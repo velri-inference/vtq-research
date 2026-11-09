@@ -1,6 +1,6 @@
-# ltq-research
+# vtq-research
 
-The research that LTQ (*Lumen Trellis Quant*) grew out of — the weight quantization format of the [lumen-rs](https://github.com/lumen-inference/lumen-rs) engine: Python and CUDA quantizer prototypes, comparison rigs against EXL3 and GGUF, raw results. The format specification is `docs/EN/ltq-format.md` in lumen-rs; the rationale and summary tables are in `docs/EN/ltq-design.md` there.
+The research that LTQ (*Lumen Trellis Quant*) grew out of — the weight quantization format of the [Velri](https://github.com/lumen-inference/velri) engine: Python and CUDA quantizer prototypes, comparison rigs against EXL3 and GGUF, raw results. The [format specification](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-format.md), [rationale and summary tables](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-design.md) live in Velri. Model files use `.vtq`; the LTQ v1 byte layout and internal tensor keys remain unchanged.
 
 The metric is the same everywhere: mean KL divergence from BF16 with teacher-forced tokens on two traces that take no part in calibration — English Nemotron dialogues (`nem`) and a multilingual ru / zh / de / fr / es trace (`mul`); differences are computed with a paired bootstrap over dialogues.
 
@@ -33,9 +33,9 @@ Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration,
 
 | Path | Contents |
 | --- | --- |
-| `src/liqk_v2.py` | quantizer: formats (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices, `.ltq` packing mode (`PACK`) |
+| `src/liqk_v2.py` | quantizer: formats (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices, `.vtq` packing mode (`PACK`) |
 | `src/tcq_proto.py`, `src/cuda/tcq_viterbi.cu` | Viterbi (torch reference and CUDA), table training, Gaussian rig |
-| `src/ltq_format.py`, `src/ltq_file.py` | format reference (tile, decode, self-test) and the `.ltq` container (write, read, full decode) |
+| `src/ltq_format.py`, `src/ltq_file.py` | format reference (tile, decode, self-test) and the `.vtq` container (write, read, full decode) |
 | `src/hybrid_quant.py`, `src/streaming_quant.py` | layer-wise quantizers and evaluators for models that don't fit on the GPU, with any layer types; comparison with off-the-shelf GGUF and EXL3 |
 | `src/fisher_full.py`, `src/fisher_offload.py` | Fisher row weights |
 | `src/equal_bpw.py` | equal-bitrate comparison (1B, 3B) |

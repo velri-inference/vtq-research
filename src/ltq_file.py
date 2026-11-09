@@ -1,5 +1,5 @@
 """
-The .ltq container (lumen-rs, docs/EN/ltq-format.md, sections 3, 5, 6): writing, reading and full matrix decode on GPU.
+The .vtq container (velri, docs/EN/ltq-format.md, sections 3, 5, 6): writing, reading and full matrix decode on GPU.
 
 In packing mode (`liqk_v2.PACK`) the quantizer emits, for each matrix, the tile codes (label * U + u and gain index
 per position), tile values G, fp16 d_row, int8 e and fp16 suh; here they are laid out into the spec's tile fields
@@ -7,7 +7,7 @@ per position), tile values G, fp16 d_row, int8 e and fp16 suh; here they are lai
 a JSON header. `decode_matrix` is a vectorized decoder following the spec (not the quantizer): it verifies every
 written matrix and also serves as the reference for `lumen-format`.
 
-    python -m src.ltq_file --check model.ltq   # header, sizes, full decode of a few matrices
+    python -m src.ltq_file --check model.vtq   # header, sizes, full decode of a few matrices
 """
 
 from __future__ import annotations

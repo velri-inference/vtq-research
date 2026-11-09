@@ -69,7 +69,7 @@ from src.iqk_format import (
 from src.quantize_model_iqk import LINEAR_SUBMODULES
 
 N_LUT_BUCKETS = 8192
-# Packing mode for .ltq (src/ltq_file.py): if not None, the TCQ quantizer stores the matrix's tile codes, d_row, e and suh,
+# Packing mode for .vtq (src/ltq_file.py): if not None, the TCQ quantizer stores the matrix's tile codes, d_row, e and suh,
 # and rebuilds the reconstructed matrix from the same fp16 fields that go into the file (PACK["matrix"] after each matrix)
 PACK: Optional[dict] = None
 
@@ -906,7 +906,7 @@ def _quantize_rows_tcq_ldlq(
     n_cand = int(os.environ.get("TCQ_NCAND", cfg.get("n_cand", 0)))
     pk = None
     if PACK is not None:
-        assert cfg.get("tb") and cfg.get("row_scale"), f"{spec_name}: only formats with tail-biting and d_row are written to .ltq"
+        assert cfg.get("tb") and cfg.get("row_scale"), f"{spec_name}: only formats with tail-biting and d_row are written to .vtq"
         pk = {"idx": torch.empty((M, K), dtype=torch.int16, device=device), "gi": torch.empty((M, K), dtype=torch.uint8, device=device),
               "G": torch.empty((M, K), dtype=torch.float32, device=device), "cur": None}
 

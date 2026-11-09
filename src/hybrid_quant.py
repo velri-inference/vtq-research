@@ -423,9 +423,9 @@ def main():
     ap.add_argument("--max_layers", type=int, default=0, help="for smoke tests: only the first N layers")
     ap.add_argument("--max_seqs", type=int, default=0, help="for smoke tests: only the first N dialogues of each trace")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--save_assignments", type=Path, default=None, help="directory for DP assignments (for packing into .ltq)")
+    ap.add_argument("--save_assignments", type=Path, default=None, help="directory for DP assignments (for packing into .vtq)")
     ap.add_argument("--pack", action="append", default=[], metavar="METHOD=FILE",
-                    help="write the quant of a dp / dpfile method to .ltq (with unquantized tensors and metadata); may be repeated")
+                    help="write the quant of a dp / dpfile method to .vtq (with unquantized tensors and metadata); may be repeated")
     args = ap.parse_args()
 
     device = torch.device("cuda")

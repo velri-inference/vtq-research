@@ -11514,7 +11514,7 @@
         ]
       },
       "pack": {
-        "path": "/content/ltq/Qwen3.8-27B-LTQ-2.94bpw.ltq",
+        "path": "/content/ltq/Qwen3.8-27B-LTQ-2.94bpw.vtq",
         "file_bytes": 15931329984,
         "quantized_matrices": 400,
         "matrix_bytes": 8955275024
@@ -12184,7 +12184,7 @@
         ]
       },
       "pack": {
-        "path": "/content/ltq/Qwen3.8-27B-LTQ-3.48bpw.ltq",
+        "path": "/content/ltq/Qwen3.8-27B-LTQ-3.48bpw.vtq",
         "file_bytes": 17582049408,
         "quantized_matrices": 400,
         "matrix_bytes": 10605994496

@@ -1,5 +1,5 @@
 """
-Reference implementation of the LTQ v1 format (lumen-rs, docs/EN/ltq-format.md): 16x16 tile packing and decoding per the
+Reference implementation of the LTQ v1 format (velri, docs/EN/ltq-format.md): 16x16 tile packing and decoding per the
 spec, independent of the quantizer. Self-test (`python -m src.ltq_format`): for each format of the TCQPQ menu, quantizes
 Gaussian tiles with CUDA Viterbi (tail-biting, extended labels, fractional modes), checks that the quantizer's labels match
 the labels computed from the code bits and spec masks, that the fractional-mode constraints hold, packs the tile fields
