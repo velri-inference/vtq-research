@@ -1,0 +1,370 @@
+{
+  "tiles_256": {
+    "VTQ150_D2": {
+      "tile_bytes": 50,
+      "bpw_k4096": 1.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ150": {
+      "tile_bytes": 50,
+      "bpw_k4096": 1.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ175": {
+      "tile_bytes": 58,
+      "bpw_k4096": 1.8477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ200_H0": {
+      "tile_bytes": 64,
+      "bpw_k4096": 2.0352,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ200": {
+      "tile_bytes": 66,
+      "bpw_k4096": 2.0977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ225": {
+      "tile_bytes": 74,
+      "bpw_k4096": 2.3477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ250": {
+      "tile_bytes": 82,
+      "bpw_k4096": 2.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ250_H2": {
+      "tile_bytes": 84,
+      "bpw_k4096": 2.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ275": {
+      "tile_bytes": 90,
+      "bpw_k4096": 2.8477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ275_H2": {
+      "tile_bytes": 92,
+      "bpw_k4096": 2.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ300_H1": {
+      "tile_bytes": 98,
+      "bpw_k4096": 3.0977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ300": {
+      "tile_bytes": 100,
+      "bpw_k4096": 3.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ325": {
+      "tile_bytes": 108,
+      "bpw_k4096": 3.4102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ350": {
+      "tile_bytes": 116,
+      "bpw_k4096": 3.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ375": {
+      "tile_bytes": 124,
+      "bpw_k4096": 3.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ400_H2": {
+      "tile_bytes": 132,
+      "bpw_k4096": 4.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ400": {
+      "tile_bytes": 134,
+      "bpw_k4096": 4.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ425": {
+      "tile_bytes": 140,
+      "bpw_k4096": 4.4102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ450": {
+      "tile_bytes": 148,
+      "bpw_k4096": 4.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ475": {
+      "tile_bytes": 156,
+      "bpw_k4096": 4.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ500_H2": {
+      "tile_bytes": 164,
+      "bpw_k4096": 5.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ500": {
+      "tile_bytes": 166,
+      "bpw_k4096": 5.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ550": {
+      "tile_bytes": 182,
+      "bpw_k4096": 5.7227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ575": {
+      "tile_bytes": 190,
+      "bpw_k4096": 5.9727,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ600_H2": {
+      "tile_bytes": 196,
+      "bpw_k4096": 6.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ600": {
+      "tile_bytes": 198,
+      "bpw_k4096": 6.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    }
+  },
+  "rings_160": {
+    "VTQ150_D2": {
+      "tile_bytes": 32,
+      "bpw_k4096": 1.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ150": {
+      "tile_bytes": 32,
+      "bpw_k4096": 1.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ175": {
+      "tile_bytes": 38,
+      "bpw_k4096": 1.8477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ200_H0": {
+      "tile_bytes": 40,
+      "bpw_k4096": 2.0352,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ200": {
+      "tile_bytes": 42,
+      "bpw_k4096": 2.0977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ225": {
+      "tile_bytes": 48,
+      "bpw_k4096": 2.3477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ250": {
+      "tile_bytes": 52,
+      "bpw_k4096": 2.5977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ250_H2": {
+      "tile_bytes": 54,
+      "bpw_k4096": 2.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ275": {
+      "tile_bytes": 58,
+      "bpw_k4096": 2.8477,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ275_H2": {
+      "tile_bytes": 60,
+      "bpw_k4096": 2.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ300_H1": {
+      "tile_bytes": 62,
+      "bpw_k4096": 3.0977,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ300": {
+      "tile_bytes": 64,
+      "bpw_k4096": 3.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ325": {
+      "tile_bytes": 70,
+      "bpw_k4096": 3.4102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ350": {
+      "tile_bytes": 74,
+      "bpw_k4096": 3.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ375": {
+      "tile_bytes": 80,
+      "bpw_k4096": 3.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ400_H2": {
+      "tile_bytes": 84,
+      "bpw_k4096": 4.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ400": {
+      "tile_bytes": 84,
+      "bpw_k4096": 4.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ425": {
+      "tile_bytes": 90,
+      "bpw_k4096": 4.4102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ450": {
+      "tile_bytes": 94,
+      "bpw_k4096": 4.6602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ475": {
+      "tile_bytes": 100,
+      "bpw_k4096": 4.9102,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ500_H2": {
+      "tile_bytes": 104,
+      "bpw_k4096": 5.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ500": {
+      "tile_bytes": 104,
+      "bpw_k4096": 5.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ550": {
+      "tile_bytes": 114,
+      "bpw_k4096": 5.7227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ575": {
+      "tile_bytes": 120,
+      "bpw_k4096": 5.9727,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ600_H2": {
+      "tile_bytes": 124,
+      "bpw_k4096": 6.1602,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    },
+    "VTQ600": {
+      "tile_bytes": 124,
+      "bpw_k4096": 6.2227,
+      "label_mismatch": 0,
+      "frac_violations": 0,
+      "decode_mismatch": 0
+    }
+  }
+}
