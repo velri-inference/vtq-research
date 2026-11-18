@@ -64,6 +64,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TABLES_PATH = ROOT / "results" / "vtq_v3_tables.json"
 
 PACK: dict | None = None
+_MEM_MARKS: Optional[List[Tuple[str, float]]] = None  # set to `[]` to record peak VRAM (GiB) per encoder stage
 VTQ3_CONFIG: Dict[str, dict] = {}
 VTQ3_MENU: List[str] = []
 _GPU_TAB_CACHE: Dict[Tuple[str, torch.device], Tuple[torch.Tensor, torch.Tensor]] = {}
@@ -96,6 +97,13 @@ VTQ3_SPECS_DEF: List[Tuple[str, int]] = [
     ("VTQ3_575",      57),  # 5.96875 bpw (K=6, D4,       nl=16, h=3, at2z_32_32)
     ("VTQ3_600",      60),  # 6.21875 bpw (K=6, plain,    nl=16, h=3, at2z_32_32)
 ]
+
+def _mem_mark(tag: str):
+    """Diagnostics only: records `torch.cuda.max_memory_allocated()` (GiB, since the last mark) when `_MEM_MARKS` is a list."""
+    if _MEM_MARKS is not None:
+        _MEM_MARKS.append((tag, torch.cuda.max_memory_allocated() / 2**30))
+        torch.cuda.reset_peak_memory_stats()
+
 
 _FRAC_TO_TCQ_PP = {0: 0, 1: 4, 2: 2, 3: 3}
 _NL_TO_M_EXTRA = {16: (40, 475), 8: (462,), 4: ()}
@@ -591,13 +599,25 @@ def quantize_matrix_vtq3(
     nblocks = Kin // TILE
 
     W_rot, H_rot, suh = compute_suh_vtq3(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block)
+    _mem_mark("suh_rot")
     dmean = H_rot.diagonal().mean().clamp(min=1e-8)
-    H_reg = H_rot.clone()
+    # `H_rot` is only needed afterwards by the two-sided Gauss-Seidel polish (`u_sb_gecd_sweeps > 0`); otherwise
+    # regularize it in place and free it right away (saves one `K x K` buffer at the Cholesky peak).
+    keep_h_rot = u_sb_gecd_sweeps > 0 and nblocks > 1
+    H_reg = H_rot.clone() if keep_h_rot else H_rot
     H_reg.diagonal().add_(damp * dmean)
-    L_flip = torch.linalg.cholesky(H_reg.flip(0, 1))
+    if not keep_h_rot:
+        del H_rot
+    H_flip = H_reg.flip(0, 1)
     del H_reg
-    U_nat = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False).flip(0, 1)
+    L_flip = torch.linalg.cholesky(H_flip)
+    del H_flip
+    _mem_mark("cholesky")
+    U_inv_flip = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False)
     del L_flip
+    U_nat = U_inv_flip.flip(0, 1)
+    del U_inv_flip
+    _mem_mark("u_nat")
 
     eye256 = torch.eye(TILE, dtype=torch.float32, device=dev).unsqueeze(0).expand(nblocks, -1, -1)
     U_blks = torch.stack([U_nat[b * TILE : (b + 1) * TILE, b * TILE : (b + 1) * TILE] for b in range(nblocks)], dim=0)
@@ -620,8 +640,6 @@ def quantize_matrix_vtq3(
             "Ub_gs_all": Ub_gs_all,
             "H_bb_inv_all": H_bb_inv_all,
         }
-    else:
-        del H_rot
 
     row_slices = [(0, M, spec_or_row_specs)] if isinstance(spec_or_row_specs, str) else list(spec_or_row_specs)
     by_spec: Dict[str, List[Tuple[int, int]]] = {}
@@ -664,13 +682,17 @@ def quantize_matrix_vtq3(
             pm["u_all"][rows_idx] = sub_out["u_all"]
 
     del U_nat, U_blks, U_blks_inv, gs_ctx, W_rot
+    _mem_mark("ldlq")
 
-    # Exact bit-accurate reconstruction + 2 alternating `(c_row -> d_row, suh)` global refit sweeps:
+    # Exact bit-accurate reconstruction + `VTQ3_REFIT_SWEEPS` alternating `(c_row -> d_row, suh)` global refit sweeps:
     suh_fp16 = suh.to(torch.float16)
     d_eff_base = d_row_all.float().unsqueeze(1) * (u_sb_all.float() * float(U_SB_UNIT))
     W_rot_hat = (G_nat_all.view(M, nblocks, TILE) * d_eff_base.unsqueeze(-1)).reshape(M, Kin)
     U_base = apply_vtq3_rot(W_rot_hat, rot_block=rot_block, transpose=True)
     W_hat_eff = U_base * suh_fp16.float().unsqueeze(0)
+    del U_base
+    if not emit_pack:
+        del W_rot_hat  # only `PACK["matrix"]["W_hat_rot"]` needs it
 
     HW = W_src @ H_f32
     HQ = W_hat_eff @ H_f32
@@ -680,7 +702,8 @@ def quantize_matrix_vtq3(
     else:
         rw = None
 
-    for _ in range(2):
+    # Two sweeps give the same SNR as one (<= 0.001 bit on 12 real Llama-3.2-3B matrices) for ~+20% encoder time on wide `K`.
+    for _ in range(int(os.environ.get("VTQ3_REFIT_SWEEPS", "1"))):
         c_row = (W_hat_eff * HW).sum(dim=1) / (W_hat_eff * HQ).sum(dim=1).clamp(min=1e-12)
         c_row = torch.where(torch.isfinite(c_row) & (c_row > 0.5) & (c_row < 2.0), c_row, torch.ones_like(c_row))
         d_row_cand = (d_row_all.float() * c_row).to(torch.float16)
@@ -688,13 +711,18 @@ def quantize_matrix_vtq3(
         d_eff_cand = d_row_cand.float().unsqueeze(1) * (u_sb_all.float() * float(U_SB_UNIT))
         W_rot_cand = (G_nat_all.view(M, nblocks, TILE) * d_eff_cand.unsqueeze(-1)).reshape(M, Kin)
         U_scaled = apply_vtq3_rot(W_rot_cand, rot_block=rot_block, transpose=True)
+        if not emit_pack:
+            del W_rot_cand
         U_w = (U_scaled * rw.unsqueeze(1)) if rw is not None else U_scaled
 
-        A_in = (U_w.T @ U_scaled) * H_f32
+        A_in = U_w.T @ U_scaled
+        A_in.mul_(H_f32)
         b_in = (U_w * HW).sum(dim=0)
+        del U_w
         A_in.diagonal().add_(1e-3 * A_in.diagonal().mean().clamp(min=1e-12))
         try:
             suh_try = torch.linalg.solve(A_in, b_in).to(torch.float16)
+            del A_in
             valid_s = torch.isfinite(suh_try.float()) & (suh_try.float().abs() > 0.05) & (suh_try.float().abs() < 10.0)
             suh_try = torch.where(valid_s, suh_try, suh_fp16)
             W_hat_cand = U_scaled * suh_try.float().unsqueeze(0)
@@ -708,11 +736,13 @@ def quantize_matrix_vtq3(
             if l_new < l_old:
                 d_row_all = d_row_cand
                 suh_fp16 = suh_try
-                W_rot_hat = W_rot_cand
+                if emit_pack:
+                    W_rot_hat = W_rot_cand
                 W_hat_eff = W_hat_cand
                 HQ = HQ_cand
         except RuntimeError:
             break
+    _mem_mark("refit")
 
     if emit_pack and pm is not None:
         W_hat_eff = assemble_vtq3(G_nat_all, d_row_all, u_sb_all, suh_fp16, rot_block=rot_block)
