@@ -105,7 +105,8 @@ def build_skeleton(model_dir: Path, device):
         model.lm_head.weight.data.copy_(model.model.embed_tokens.weight.data)
     else:
         load_module_weights(model.lm_head, "lm_head", store, device)
-    model.model.rotary_emb = type(model.model.rotary_emb)(config=config, device=device)
+    with torch.device(device):
+        model.model.rotary_emb = type(model.model.rotary_emb)(config=config)
     return model, store, config
 
 

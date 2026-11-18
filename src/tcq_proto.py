@@ -530,6 +530,8 @@ def _tcq_lib():
         lib.lut_subs_quant.restype = ctypes.c_int
         lib.lut_subs_quant.argtypes = [ctypes.c_void_p] * 4 + [ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_int,
                                                                ctypes.c_void_p]
+        lib.tcq_ldlq_block256.restype = ctypes.c_int
+        lib.tcq_ldlq_block256.argtypes = [ctypes.c_void_p] * 19 + [ctypes.c_int] * 12 + [ctypes.c_void_p]
         _TCQ_LIB = lib
     return _TCQ_LIB
 
@@ -631,7 +633,9 @@ def viterbi_ub_cuda(x: torch.Tensor, small: torch.Tensor, K: int, nu: int, m: in
     best = torch.empty(N, dtype=torch.int32, device=dev)
     code = torch.empty((N, ld), dtype=torch.int32, device=dev) if return_code else None
     mid = torch.empty(N, dtype=torch.int32, device=dev) if _mid else None
-    if int(pair_parity) >= 2:  # groups of 4 (even sum / all equal): 9 bit planes per group
+    if int(pair_parity) == 4:  # extended Hamming [8, 4, 4] Gosset E8 LSB: 71 bit planes per 8-weight group
+        pbits = torch.empty((N, T // 8, G_run, 71, S // 32), dtype=torch.int32, device=dev)
+    elif int(pair_parity) >= 2:  # groups of 4 (even sum / all equal): 9 bit planes per group
         pbits = torch.empty((N, T // 4, G_run, 9, S // 32), dtype=torch.int32, device=dev)
     else:
         pbits = torch.empty((N, T // 2, G_run, S // 32), dtype=torch.int32, device=dev) if pair_parity else None
@@ -655,3 +659,91 @@ def viterbi_ub_cuda(x: torch.Tensor, small: torch.Tensor, K: int, nu: int, m: in
     if return_code:  # (rec, gain index [N, T], level index in the table [N, T]); with n_cand the index is into Gfull
         return rec, code >> 16, code & 0xffff
     return (rec, end) if return_end_state else rec
+
+
+_LDLQ_WS_CACHE: dict[tuple, dict[str, torch.Tensor]] = {}
+
+
+def _get_ldlq_ws(dev: torch.device, nt: int, S: int, G_max: int = 8) -> dict[str, torch.Tensor]:
+    key = (dev, S)
+    ws = _LDLQ_WS_CACHE.get(key)
+    # Reuse or grow workspace so across matrices of varying M we allocate at most once for max(M)
+    if ws is None or ws["nt"] < nt or ws["G_max"] < G_max:
+        gm = max(G_max, ws["G_max"] if ws is not None else 8)
+        nt_m = max(nt, ws["nt"] if ws is not None else 0)
+        ws = {
+            "nt": nt_m,
+            "G_max": gm,
+            "tiles": torch.empty((nt_m, 256), dtype=torch.float32, device=dev),
+            "wts": torch.empty((nt_m, 256), dtype=torch.float32, device=dev),
+            "rec": torch.empty((nt_m, 256), dtype=torch.float32, device=dev),
+            "bp": torch.empty((nt_m, 256, gm, S // 32), dtype=torch.int32, device=dev),
+            "gsel": torch.empty((nt_m, 16, S), dtype=torch.uint8, device=dev),
+            "cand": torch.empty((nt_m, 16, gm), dtype=torch.uint8, device=dev),
+            "best": torch.empty((nt_m,), dtype=torch.int32, device=dev),
+            "mid": torch.empty((nt_m,), dtype=torch.int32, device=dev),
+            "code_tile": torch.empty((nt_m, 256), dtype=torch.int32, device=dev),
+            # Largest pbits across pp in {1, 2, 3, 4}: 32 * gm * 71 * (S // 32) int32s per tile
+            "pbits": torch.empty((nt_m, 32 * gm * 71 * (S // 32)), dtype=torch.int32, device=dev),
+        }
+        _LDLQ_WS_CACHE[key] = ws
+    return ws
+
+
+@torch.no_grad()
+def ldlq_block256_cuda(
+    w_sub_work: torch.Tensor,
+    d_rb: torch.Tensor,
+    dw_blk: torch.Tensor,
+    U_blk: torch.Tensor,
+    U_blk_inv: torch.Tensor,
+    small: torch.Tensor,
+    K: int,
+    nu: int,
+    m: int,
+    gains: torch.Tensor,
+    n_cand: int = 0,
+    tb_window: int = 32,
+    m_extra: tuple = (),
+    pair_parity: int | bool = 0,
+    return_code: bool = False,
+):
+    """Fused 16-subblock Block16-LDLQ loop in C++/CUDA over a 256-column block `w_sub_work [M, 256]`."""
+    M, cols = w_sub_work.shape
+    assert cols == 256 and M % 16 == 0
+    dev = w_sub_work.device
+    nt = M // 16
+    S = 1 << nu
+    g = gains.float().contiguous()
+    tab = small.float().contiguous()
+    Gfull = g.numel()
+    G_run = n_cand if 0 < n_cand < Gfull else Gfull
+    nl = 4 << len(m_extra)
+    pp = int(pair_parity)
+    ws = _get_ldlq_ws(dev, nt, S, max(G_run, 4))
+
+    w_work_c = w_sub_work if (w_sub_work.dtype == torch.float32 and w_sub_work.is_contiguous()) else w_sub_work.float().contiguous()
+    d_c = d_rb.float().contiguous()
+    dw_c = dw_blk.float().contiguous()
+    Ub_c = U_blk.float().contiguous()
+    Ubi_c = U_blk_inv.float().contiguous()
+    G_pass = torch.empty((M, 256), dtype=torch.float32, device=dev)
+    code_blk = torch.empty((M, 256), dtype=torch.int32, device=dev) if return_code else None
+    m2, m3, m4 = (list(m_extra) + [0, 0, 0])[:3]
+
+    rc = _tcq_lib().tcq_ldlq_block256(
+        w_work_c.data_ptr(), d_c.data_ptr(), dw_c.data_ptr(), Ub_c.data_ptr(), Ubi_c.data_ptr(),
+        G_pass.data_ptr(), code_blk.data_ptr() if code_blk is not None else None,
+        tab.data_ptr(), g.data_ptr(),
+        ws["tiles"].data_ptr(), ws["wts"].data_ptr(), ws["rec"].data_ptr(),
+        ws["bp"].data_ptr(), ws["gsel"].data_ptr(), ws["cand"].data_ptr(),
+        ws["best"].data_ptr(), ws["mid"].data_ptr(), ws["code_tile"].data_ptr(),
+        ws["pbits"].data_ptr() if pp > 0 else None,
+        M, K, nu, m, m2, m3, m4, nl, G_run, Gfull, tb_window, pp,
+        torch.cuda.current_stream().cuda_stream,
+    )
+    if rc != 0:
+        raise RuntimeError(f"tcq_ldlq_block256: CUDA error code {rc}")
+    if return_code:
+        return G_pass, (code_blk >> 16).to(torch.uint8), (code_blk & 0xffff).to(torch.int16)
+    return G_pass

@@ -682,6 +682,404 @@ __global__ void __launch_bounds__(BLOCK) tcq_forward_kernel(const TcqArgs a)
     }
 }
 
+// Extended Hamming [8, 4, 4] Gosset E8 LSB trellis (pp == 4, rate K - 0.5: 4 parity bits per 8 weights).
+// Codewords are (u, v) in D4 x D4 sharing the same coset class z = 2*d + c in {0..3}:
+//   u = (fu, fu ^ c, fu ^ d, fu ^ c ^ d),  v = (fv, fv ^ c, fv ^ d, fv ^ c ^ d),  fu, fv in {0, 1}.
+template <int BLOCK, int SPT, int G, int NL>
+__global__ void __launch_bounds__(BLOCK) tcq_forward_gosset84_kernel(const TcqArgs a)
+{
+    static_assert(BLOCK == 256 && SPT == 4, "gosset84 requires 256x4 radix-4 configuration");
+    constexpr int S = BLOCK * SPT;
+    constexpr int WORDS = S / 32;
+    constexpr int HALF = S / 2;
+    constexpr int Q = S / 4;
+    constexpr int NPL8 = 71;
+    const int T = a.T, sub = a.sub, U = a.U;
+    extern __shared__ float smem[];
+    float* dp0 = smem;                        // [G, S]
+    float* dp1 = smem + G * S;                // [G, S]
+    float* dp_tmp = smem + 2 * G * S;         // [G, S]
+    float* s_err = smem + 3 * G * S;          // [sub, G, NL, 2]
+    float* s_x = s_err + sub * G * NL * 2;    // [T]
+    float* s_w = s_x + T;                     // [T]
+    __shared__ float s_tab[4 * MAX_U], s_gain[MAX_G];
+    __shared__ uint8_t s_gc[MAX_SUBS * G];
+    __shared__ float s_ce[MAX_SUBS * MAX_G];
+    __shared__ float red_v[BLOCK / 32];
+    __shared__ int red_i[BLOCK / 32];
+
+    const int n = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    uint8_t* gsn = a.gsel + (size_t)n * (T / sub) * S;
+    uint32_t* gpn = a.pbits + (size_t)n * (T / 8) * G * NPL8 * WORDS;
+    const int nsub = T / sub, Gf = a.Gfull;
+    const bool cand = a.gcand != nullptr;
+
+    for (int i = tid; i < T; i += BLOCK) {
+        const size_t j = (size_t)n * a.ld + (i + a.rot) % a.ld;
+        s_x[i] = a.x[j];
+        s_w[i] = a.w[j];
+    }
+    for (int i = tid; i < NL * U; i += BLOCK) s_tab[i] = a.tab[i];
+    if (tid < a.Gfull) s_gain[tid] = a.gains[tid];
+
+    int labs[SPT], r4m[4], r4o[4];
+    #pragma unroll
+    for (int k = 0; k < SPT; k++) labs[k] = tcq_label_x(tid + k * BLOCK, a, NL);
+    #pragma unroll
+    for (int c = 0; c < 4; c++) {
+        r4m[c] = tcq_label_x((c < 2 ? 0 : HALF) + 2 * tid + (c & 1), a, NL);
+        r4o[c] = tcq_label_x(4 * tid + c, a, NL);
+    }
+    const int s0 = a.init_st ? a.init_st[n] : -1;
+    __syncthreads();
+
+    if (cand) {
+        for (int i = tid; i < nsub * Gf; i += BLOCK) {
+            const int j = i / Gf, gi = i % Gf;
+            float e = 0.f;
+            for (int t = j * sub; t < (j + 1) * sub; t++)
+                e += branch_err(s_x[t], s_gain[gi], s_tab, NL * U) * s_w[t];
+            s_ce[i] = e;
+        }
+        __syncthreads();
+        if (tid < nsub) {
+            uint32_t used = 0;
+            for (int c = 0; c < G; c++) {
+                int bg = 0;
+                float be = 3.4e38f;
+                for (int gi = 0; gi < Gf; gi++)
+                    if (!((used >> gi) & 1) && s_ce[tid * Gf + gi] < be) { be = s_ce[tid * Gf + gi]; bg = gi; }
+                used |= 1u << bg;
+                s_gc[tid * G + c] = (uint8_t)bg;
+                a.gcand[((size_t)n * nsub + tid) * G + c] = (uint8_t)bg;
+            }
+        }
+        __syncthreads();
+    }
+
+    auto r4_step = [&](const float* in_dp, const float* e0, const float* e1, int pa, int pb, int g,
+                       uint32_t* gw, int pl_even, int pl_odd, float ov[4]) {
+        const float* c_ = in_dp + g * S;
+        float i0 = c_[tid], i1 = c_[Q + tid], i2 = c_[HALF + tid], i3 = c_[3 * Q + tid];
+        bool h02 = i2 < i0, h13 = i3 < i1;
+        float a02 = h02 ? i2 : i0, a13 = h13 ? i3 : i1;
+        uint32_t b02 = __ballot_sync(0xffffffffu, h02), b13 = __ballot_sync(0xffffffffu, h13);
+        if (pl_even >= 0 && lane < 4) {
+            uint32_t src = lane < 2 ? b02 : b13;
+            gw[pl_even * WORDS + (lane < 2 ? 0 : HALF / 32) + 2 * warp + (lane & 1)] =
+                spread2(lane & 1 ? src >> 16 : src & 0xffffu);
+        }
+        float m0 = a02 + e0[(g * NL + r4m[0]) * 2 + pa], m1 = a02 + e0[(g * NL + r4m[1]) * 2 + pa];
+        float m2 = a13 + e0[(g * NL + r4m[2]) * 2 + pa], m3 = a13 + e0[(g * NL + r4m[3]) * 2 + pa];
+        bool ha = m2 < m0, hb = m3 < m1;
+        float aa = ha ? m2 : m0, ab = hb ? m3 : m1;
+        ov[0] = aa + e1[(g * NL + r4o[0]) * 2 + pb];
+        ov[1] = aa + e1[(g * NL + r4o[1]) * 2 + pb];
+        ov[2] = ab + e1[(g * NL + r4o[2]) * 2 + pb];
+        ov[3] = ab + e1[(g * NL + r4o[3]) * 2 + pb];
+        uint32_t ba = __ballot_sync(0xffffffffu, ha), bb = __ballot_sync(0xffffffffu, hb);
+        if (lane < 4)
+            gw[pl_odd * WORDS + 4 * warp + lane] = spread4((ba >> (8 * lane)) & 0xffu) * 3u |
+                                                   spread4((bb >> (8 * lane)) & 0xffu) * 12u;
+    };
+
+    auto store_cc_plane = [&](uint32_t* gw, int pl, const bool f[4]) {
+        uint32_t wf[4];
+        #pragma unroll
+        for (int cc = 0; cc < 4; cc++) wf[cc] = __ballot_sync(0xffffffffu, f[cc]);
+        if (lane < 4) {
+            uint32_t xf = 0;
+            #pragma unroll
+            for (int cc = 0; cc < 4; cc++) xf |= spread4((wf[cc] >> (8 * lane)) & 0xffu) << cc;
+            gw[pl * WORDS + 4 * warp + lane] = xf;
+        }
+    };
+
+    for (int t0 = 0; t0 < T; t0 += sub) {
+        if (t0 > 0 && G > 1) {
+            #pragma unroll
+            for (int k = 0; k < SPT; k++) {
+                int s = tid + k * BLOCK;
+                float best = dp0[s];
+                int bg = 0;
+                #pragma unroll
+                for (int g = 1; g < G; g++) {
+                    float v = dp0[g * S + s];
+                    if (v < best) { best = v; bg = g; }
+                }
+                gsn[(size_t)(t0 / sub) * S + s] = (uint8_t)bg;
+                #pragma unroll
+                for (int g = 0; g < G; g++) dp0[g * S + s] = best;
+            }
+        }
+        for (int i = tid; i < sub * G * NL * 2; i += BLOCK) {
+            const int t = t0 + i / (G * NL * 2), g = (i / (NL * 2)) % G, lb = (i / 2) % NL, p = i & 1;
+            const int gi = cand ? (int)s_gc[(t0 / sub) * G + g] : g;
+            s_err[i] = branch_err_par(s_x[t], s_gain[gi], s_tab + lb * U, U, p) * s_w[t];
+        }
+        __syncthreads();
+
+        for (int t8 = t0; t8 < t0 + sub; t8 += 8) {
+            const int grp8 = t8 >> 3;
+            const float* e_base = s_err + (t8 - t0) * G * NL * 2;
+            float best_v[G][4];
+            uint8_t wz[G][4], wfv[G][4];
+            #pragma unroll
+            for (int g = 0; g < G; g++)
+                #pragma unroll
+                for (int cc = 0; cc < 4; cc++) { best_v[g][cc] = 3.4e38f; wz[g][cc] = 0; wfv[g][cc] = 0; }
+
+            for (int z = 0; z < 4; z++) {
+                const int c = z & 1, d = z >> 1;
+                float u_best[G][4];
+                bool fu_w[G][4];
+                for (int fu = 0; fu < 2; fu++) {
+                    const int ku = 2 * z + fu;
+                    const int b0 = fu, b1 = fu ^ c, b2 = fu ^ d, b3 = fu ^ c ^ d;
+                    if (t8 == 0) {
+                        const float* e0 = e_base;
+                        const float* e1 = e_base + G * NL * 2;
+                        #pragma unroll
+                        for (int k = 0; k < SPT; k++) {
+                            int s = tid + k * BLOCK;
+                            bool ok = s0 < 0 || (s >> 1) == (s0 & (HALF - 1));
+                            #pragma unroll
+                            for (int g = 0; g < G; g++)
+                                dp_tmp[g * S + s] = ok ? e0[(g * NL + labs[k]) * 2 + b0] : 3.4e38f;
+                        }
+                        __syncthreads();
+                        float o1[SPT][G];
+                        #pragma unroll
+                        for (int k = 0; k < SPT; k++) {
+                            int s = tid + k * BLOCK;
+                            int q0 = s >> 1, q1 = HALF + (s >> 1);
+                            #pragma unroll
+                            for (int g = 0; g < G; g++) {
+                                uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                                float va = dp_tmp[g * S + q0], vb = dp_tmp[g * S + q1];
+                                bool h = vb < va;
+                                o1[k][g] = (h ? vb : va) + e1[(g * NL + labs[k]) * 2 + b1];
+                                uint32_t bits = __ballot_sync(0xffffffffu, h);
+                                if (lane == 0) gw[(8 + ku) * WORDS + (s >> 5)] = bits;
+                            }
+                        }
+                        __syncthreads();
+                        #pragma unroll
+                        for (int k = 0; k < SPT; k++)
+                            #pragma unroll
+                            for (int g = 0; g < G; g++) dp_tmp[g * S + tid + k * BLOCK] = o1[k][g];
+                    } else {
+                        #pragma unroll
+                        for (int g = 0; g < G; g++) {
+                            uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                            float ov[4];
+                            r4_step(dp0, e_base, e_base + G * NL * 2, b0, b1, g, gw, 0 + ku, 8 + ku, ov);
+                            *reinterpret_cast<float4*>(dp_tmp + g * S + 4 * tid) = make_float4(ov[0], ov[1], ov[2], ov[3]);
+                        }
+                    }
+                    __syncthreads();
+                    #pragma unroll
+                    for (int g = 0; g < G; g++) {
+                        uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                        float ov[4];
+                        r4_step(dp_tmp, e_base + 2 * G * NL * 2, e_base + 3 * G * NL * 2, b2, b3, g, gw, 16 + ku, 24 + ku, ov);
+                        if (fu == 0) {
+                            #pragma unroll
+                            for (int cc = 0; cc < 4; cc++) { u_best[g][cc] = ov[cc]; fu_w[g][cc] = false; }
+                        } else {
+                            #pragma unroll
+                            for (int cc = 0; cc < 4; cc++)
+                                if (ov[cc] < u_best[g][cc]) { u_best[g][cc] = ov[cc]; fu_w[g][cc] = true; }
+                        }
+                    }
+                    __syncthreads();
+                }
+                #pragma unroll
+                for (int g = 0; g < G; g++) {
+                    *reinterpret_cast<float4*>(dp1 + g * S + 4 * tid) =
+                        make_float4(u_best[g][0], u_best[g][1], u_best[g][2], u_best[g][3]);
+                    uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                    store_cc_plane(gw, 32 + z, fu_w[g]);
+                }
+                __syncthreads();
+
+                for (int fv = 0; fv < 2; fv++) {
+                    const int kv = 2 * z + fv;
+                    const int b4 = fv, b5 = fv ^ c, b6 = fv ^ d, b7 = fv ^ c ^ d;
+                    #pragma unroll
+                    for (int g = 0; g < G; g++) {
+                        uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                        float ov[4];
+                        r4_step(dp1, e_base + 4 * G * NL * 2, e_base + 5 * G * NL * 2, b4, b5, g, gw, 36 + kv, 44 + kv, ov);
+                        *reinterpret_cast<float4*>(dp_tmp + g * S + 4 * tid) = make_float4(ov[0], ov[1], ov[2], ov[3]);
+                    }
+                    __syncthreads();
+                    #pragma unroll
+                    for (int g = 0; g < G; g++) {
+                        uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                        float ov[4];
+                        r4_step(dp_tmp, e_base + 6 * G * NL * 2, e_base + 7 * G * NL * 2, b6, b7, g, gw, 52 + kv, 60 + kv, ov);
+                        #pragma unroll
+                        for (int cc = 0; cc < 4; cc++)
+                            if (ov[cc] < best_v[g][cc]) { best_v[g][cc] = ov[cc]; wz[g][cc] = (uint8_t)z; wfv[g][cc] = (uint8_t)fv; }
+                    }
+                    __syncthreads();
+                }
+            }
+
+            #pragma unroll
+            for (int g = 0; g < G; g++) {
+                *reinterpret_cast<float4*>(dp0 + g * S + 4 * tid) =
+                    make_float4(best_v[g][0], best_v[g][1], best_v[g][2], best_v[g][3]);
+                uint32_t* gw = gpn + ((size_t)grp8 * G + g) * NPL8 * WORDS;
+                bool fz0[4], fz1[4], ffv[4];
+                #pragma unroll
+                for (int cc = 0; cc < 4; cc++) {
+                    fz0[cc] = (wz[g][cc] & 1) != 0;
+                    fz1[cc] = (wz[g][cc] >> 1) != 0;
+                    ffv[cc] = wfv[g][cc] != 0;
+                }
+                store_cc_plane(gw, 68, fz0);
+                store_cc_plane(gw, 69, fz1);
+                store_cc_plane(gw, 70, ffv);
+            }
+            __syncthreads();
+        }
+    }
+
+    float bv = 3.4e38f;
+    int bi = 0x7fffffff;
+    const int s_end = a.tail ? s0 : -1;
+    #pragma unroll
+    for (int g = 0; g < G; g++)
+        #pragma unroll
+        for (int k = 0; k < SPT; k++) {
+            int idx = g * S + tid + k * BLOCK;
+            float v = (s_end < 0 || tid + k * BLOCK == s_end) ? dp0[idx] : 3.4e38f;
+            if (v < bv || (v == bv && idx < bi)) { bv = v; bi = idx; }
+        }
+    for (int off = 16; off > 0; off >>= 1) {
+        float ov = __shfl_down_sync(0xffffffffu, bv, off);
+        int oi = __shfl_down_sync(0xffffffffu, bi, off);
+        if (ov < bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+    }
+    if (lane == 0) { red_v[warp] = bv; red_i[warp] = bi; }
+    __syncthreads();
+
+    // Alias s_gp8 over dynamic smem (dp0/dp1/dp_tmp are dead; s_x stays at smem + 3*G*S + sub*G*NL*2 >= 18,176 B for G >= 2,
+    // and for G == 1 we place s_gp8 only over dp0..dp_tmp: 3 * 1024 * 4 = 12 KB < 18 KB, so read gpn directly from L1/L2 or use 2 groups)
+    __shared__ uint8_t s_gsr[S];
+    __shared__ uint16_t s_st[MAX_T];
+    __shared__ uint8_t s_g[MAX_T];
+    __shared__ uint8_t s_par[MAX_T];
+    __shared__ int s_cur[3];
+    if (tid == 0) {
+        for (int k = 1; k < BLOCK / 32; k++)
+            if (red_v[k] < bv || (red_v[k] == bv && red_i[k] < bi)) { bv = red_v[k]; bi = red_i[k]; }
+        a.best[n] = bi;
+        s_cur[0] = bi % S;
+        s_cur[1] = bi / S;
+        s_cur[2] = 0;
+        if (a.end_st) a.end_st[n] = bi % S;
+    }
+    __syncthreads();
+
+    uint32_t* s_gp8 = reinterpret_cast<uint32_t*>(smem);  // 1 group = 71 * 32 * 4 = 9088 bytes <= 3 * 1 * 1024 * 4 = 12288 bytes!
+    for (int lo = T - sub; lo >= 0; lo -= sub) {
+        const int gc = s_cur[1];
+        if (G > 1 && lo > 0)
+            for (int i = tid; i < S; i += BLOCK) s_gsr[i] = gsn[(size_t)(lo / sub) * S + i];
+        __syncthreads();
+        for (int g8 = (sub / 8) - 1; g8 >= 0; g8--) {
+            const int t_hi = lo + g8 * 8 + 7, t_lo = lo + g8 * 8;
+            const int grp8 = (lo / 8) + g8;
+            for (int i = tid; i < NPL8 * WORDS; i += BLOCK)
+                s_gp8[i] = gpn[((size_t)grp8 * G + gc) * NPL8 * WORDS + i];
+            __syncthreads();
+            if (tid == 0 && !s_cur[2]) {
+                int st = s_cur[0], g = s_cur[1], zcur = 0, fvcur = 0, fucur = 0;
+                auto gbit = [&](int pl, int s) { return (int)((s_gp8[pl * WORDS + (s >> 5)] >> (s & 31)) & 1u); };
+                for (int t = t_hi; t >= t_lo; t--) {
+                    const int off8 = t & 7;
+                    if (off8 == 7) {
+                        zcur = gbit(68, st) | (gbit(69, st) << 1);
+                        fvcur = gbit(70, st);
+                        const int c = zcur & 1, d = zcur >> 1;
+                        s_par[t - 3] = (uint8_t)fvcur;
+                        s_par[t - 2] = (uint8_t)(fvcur ^ c);
+                        s_par[t - 1] = (uint8_t)(fvcur ^ d);
+                        s_par[t - 0] = (uint8_t)(fvcur ^ c ^ d);
+                    } else if (off8 == 3) {
+                        fucur = gbit(32 + zcur, st);
+                        const int c = zcur & 1, d = zcur >> 1;
+                        s_par[t - 3] = (uint8_t)fucur;
+                        s_par[t - 2] = (uint8_t)(fucur ^ c);
+                        s_par[t - 1] = (uint8_t)(fucur ^ d);
+                        s_par[t - 0] = (uint8_t)(fucur ^ c ^ d);
+                    }
+                    s_st[t] = (uint16_t)st;
+                    s_g[t] = (uint8_t)g;
+                    if (a.mid_st && t == a.mid_t - 1) { a.mid_st[n] = st; s_cur[2] = 1; break; }
+                    if (t > 0) {
+                        const int pl = (off8 >= 4) ? (36 + (off8 - 4) * 8 + (2 * zcur + fvcur))
+                                                   : (0  + off8 * 8       + (2 * zcur + fucur));
+                        const int hh = gbit(pl, st);
+                        st = hh * HALF + (st >> 1);
+                        if (G > 1 && t == lo) g = s_gsr[st];
+                    }
+                }
+                s_cur[0] = st;
+                s_cur[1] = g;
+            }
+            __syncthreads();
+        }
+        if (s_cur[2]) return;
+    }
+
+    float* rn = a.rec + (size_t)n * a.ld;
+    for (int t = tid; t < T; t += BLOCK) {
+        const int stt = s_st[t], gg = s_g[t];
+        const int lb = tcq_label_x(stt, a, NL);
+        const int gi = cand ? (int)s_gc[(t / sub) * G + gg] : gg;
+        const float gt = s_gain[gi];
+        const float* tt = s_tab + lb * U;
+        const float xt = s_x[t];
+        float bestd = 3.4e38f, val = 0.f;
+        int bu = 0;
+        for (int u = s_par[t]; u < U; u += 2) {
+            float v = gt * tt[u];
+            float d = xt - v;
+            if (d * d < bestd) { bestd = d * d; val = v; bu = u; }
+        }
+        const int tp = (t + a.rot) % a.ld;
+        rn[tp] = val;
+        if (a.code) a.code[(size_t)n * a.ld + tp] = (gi << 16) | (lb * U + bu);
+    }
+}
+
+template <int BLOCK, int SPT, int G, int NL>
+static int launch_forward_gosset84(const TcqArgs& a, cudaStream_t stream)
+{
+    if constexpr (BLOCK == 256 && SPT == 4 && G <= 4) {
+        size_t smem = (3 * (size_t)G * a.S + (size_t)a.sub * G * a.nl * 2 + 2 * (size_t)a.T) * sizeof(float);
+        static int dyn_max = -1;
+        if (dyn_max < 0) {
+            cudaFuncAttributes fa;
+            int dev = 0, optin = 0;
+            cudaGetDevice(&dev);
+            cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+            cudaFuncGetAttributes(&fa, tcq_forward_gosset84_kernel<BLOCK, SPT, G, NL>);
+            int want = optin - (int)fa.sharedSizeBytes;
+            cudaFuncSetAttribute(tcq_forward_gosset84_kernel<BLOCK, SPT, G, NL>, cudaFuncAttributeMaxDynamicSharedMemorySize, want);
+            dyn_max = want;
+        }
+        if ((int)smem > dyn_max) return -1;
+        tcq_forward_gosset84_kernel<BLOCK, SPT, G, NL><<<a.N, BLOCK, smem, stream>>>(a);
+        return 0;
+    }
+    return -1;
+}
+
 
 template <int BLOCK, int SPT, int G, int NL, int MD = 0>
 static int launch_forward(const TcqArgs& a, cudaStream_t stream)
@@ -691,6 +1089,7 @@ static int launch_forward(const TcqArgs& a, cudaStream_t stream)
             if (a.pp == 1) return launch_forward<BLOCK, SPT, G, NL, 1>(a, stream);
             if (a.pp == 2) return launch_forward<BLOCK, SPT, G, NL, 2>(a, stream);
             if (a.pp == 3) return launch_forward<BLOCK, SPT, G, NL, 3>(a, stream);
+            if (a.pp == 4) return launch_forward_gosset84<BLOCK, SPT, G, NL>(a, stream);
         }
         return -1;
     }
@@ -746,7 +1145,8 @@ extern "C" int tcq_viterbi(
     int N, int T, int S, int U, int G, int Gfull, int m, int sub, int U_hi, int mix, int m2, int m3, int m4, int nl, int ld, int rot, uint32_t* pbits, int pp, void* stream)
 {
     if (G > MAX_G || Gfull > MAX_G || (!gcand && Gfull != G) || U > MAX_U || U_hi > MAX_U || T % sub != 0 || (sub & 1) || T / sub > MAX_SUBS || T > MAX_T || sub > 32 ||
-        sub * G * nl * (pp ? 2 : 1) > 4096 || (pp && (S != 1024 || mix > 0 || (T & 1))) || (pp >= 2 && ((T & 3) || (sub & 3))) || pp > 3 || (nl != 4 && nl != 8 && nl != 16 && nl != 32) || ld < T ||
+        sub * G * nl * (pp ? 2 : 1) > 4096 || (pp && (S != 1024 || mix > 0 || (T & 1))) || (pp >= 2 && ((T & 3) || (sub & 3))) ||
+        (pp == 4 && ((T & 7) || (sub & 7) || G > 4)) || pp > 4 || (nl != 4 && nl != 8 && nl != 16 && nl != 32) || ld < T ||
         ((S != 1024 || getenv("TCQ_BLOCK")) && nl != 4) || nl * U > 4 * MAX_U || nl * U_hi > 4 * MAX_U)
         return -1;
     TcqArgs a{x, w, tab, gains, rec, bp, gsel, init_st, end_st, tab_hi, gains_hi, gcand, best, code, mid_st, mid_t, tail,
@@ -764,6 +1164,104 @@ extern "C" int tcq_viterbi(
     if (rc != 0) return rc;
     return (int)cudaGetLastError();
 }
+
+// Fused Block16-LDLQ helper kernels for a 256-column block [M, 256] (eliminates 16x Python/PyTorch/allocation overhead)
+__global__ void ldlq_prep_sub16_kernel(const float* __restrict__ w_sub_work, const float* __restrict__ d_rb,
+                                       const float* __restrict__ dw_blk, float* __restrict__ ws_tiles,
+                                       float* __restrict__ ws_wts, int M, int s0)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= M * 16) return;
+    const int r = idx >> 4, c = idx & 15;
+    ws_tiles[idx] = w_sub_work[(size_t)r * 256 + s0 + c] / d_rb[r];
+    ws_wts[idx] = dw_blk[s0 + c];
+}
+
+__global__ void ldlq_commit_update_sub16_kernel(float* __restrict__ w_sub_work, const float* __restrict__ d_rb,
+                                                const float* __restrict__ ws_rec, const int* __restrict__ ws_code_tile,
+                                                const float* __restrict__ U_blk, const float* __restrict__ U_blk_inv,
+                                                float* __restrict__ G_pass, int* __restrict__ code_blk, int M, int s0)
+{
+    const int s1 = s0 + 16, rem = 256 - s1;
+    __shared__ float s_Uinv[16][16];
+    __shared__ float s_Urem[16][240];
+    if (rem > 0) {
+        if (threadIdx.x < 256) {
+            const int kr = threadIdx.x >> 4, kc = threadIdx.x & 15;
+            s_Uinv[kr][kc] = U_blk_inv[(s0 + kr) * 256 + (s0 + kc)];
+        }
+        for (int i = threadIdx.x; i < 16 * rem; i += blockDim.x) {
+            const int kr = i / rem, kc = i % rem;
+            s_Urem[kr][kc] = U_blk[(s0 + kr) * 256 + (s1 + kc)];
+        }
+        __syncthreads();
+    }
+
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int r = blockIdx.x * 8 + warp;
+    if (r >= M) return;
+
+    float diff_lane = 0.f;
+    if (lane < 16) {
+        const float g_val = ws_rec[(size_t)r * 16 + lane];
+        G_pass[(size_t)r * 256 + s0 + lane] = g_val;
+        if (code_blk) code_blk[(size_t)r * 256 + s0 + lane] = ws_code_tile[(size_t)r * 16 + lane];
+        if (rem > 0) diff_lane = w_sub_work[(size_t)r * 256 + s0 + lane] - d_rb[r] * g_val;
+    }
+    if (rem <= 0) return;
+
+    float err_j = 0.f;
+    #pragma unroll
+    for (int k = 0; k < 16; k++) {
+        const float dk = __shfl_sync(0xffffffffu, diff_lane, k);
+        if (lane < 16) err_j = fmaf(dk, s_Uinv[k][lane], err_j);
+    }
+    float err_k[16];
+    #pragma unroll
+    for (int k = 0; k < 16; k++) err_k[k] = __shfl_sync(0xffffffffu, err_j, k);
+
+    for (int col = s1 + lane; col < 256; col += 32) {
+        const int rc = col - s1;
+        float acc = 0.f;
+        #pragma unroll
+        for (int k = 0; k < 16; k++) acc = fmaf(err_k[k], s_Urem[k][rc], acc);
+        w_sub_work[(size_t)r * 256 + col] -= acc;
+    }
+}
+
+extern "C" int tcq_ldlq_block256(
+    float* w_sub_work, const float* d_rb, const float* dw_blk, const float* U_blk, const float* U_blk_inv,
+    float* G_pass, int* code_blk, const float* tab, const float* gains,
+    float* ws_tiles, float* ws_wts, float* ws_rec, uint32_t* ws_bp, uint8_t* ws_gsel, uint8_t* ws_cand,
+    int* ws_best, int* ws_mid, int* ws_code_tile, uint32_t* ws_pbits,
+    int M, int K, int nu, int m, int m2, int m3, int m4, int nl, int G_run, int Gfull, int tb_win, int pp, void* stream)
+{
+    if ((M & 15) != 0) return -1;
+    const int nt = M >> 4, S = 1 << nu, U = 1 << (K - 1);
+    cudaStream_t st = (cudaStream_t)stream;
+    const int T1 = tb_win > 0 ? 2 * tb_win : 256;
+    const int rot1 = tb_win > 0 ? 128 - tb_win : 0;
+    const int mid1 = tb_win > 0 ? tb_win : 128;
+    uint8_t* cand_ptr = (G_run < Gfull) ? ws_cand : nullptr;
+    int* code_tile_ptr = code_blk ? ws_code_tile : nullptr;
+
+    for (int ib = 0; ib < 16; ib++) {
+        const int s0 = ib * 16;
+        ldlq_prep_sub16_kernel<<<(M * 16 + 255) / 256, 256, 0, st>>>(w_sub_work, d_rb, dw_blk, ws_tiles, ws_wts, M, s0);
+        int rc1 = tcq_viterbi(ws_tiles, ws_wts, tab, gains, ws_rec, ws_bp, ws_gsel, nullptr, nullptr, tab, gains,
+                              cand_ptr, ws_best, nullptr, ws_mid, mid1, 0,
+                              nt, T1, S, U, G_run, Gfull, m, 16, U, 0, m2, m3, m4, nl, 256, rot1, ws_pbits, pp, stream);
+        if (rc1 != 0) return rc1;
+        int rc2 = tcq_viterbi(ws_tiles, ws_wts, tab, gains, ws_rec, ws_bp, ws_gsel, ws_mid, nullptr, tab, gains,
+                              cand_ptr, ws_best, code_tile_ptr, nullptr, 0, 1,
+                              nt, 256, S, U, G_run, Gfull, m, 16, U, 0, m2, m3, m4, nl, 256, 128, ws_pbits, pp, stream);
+        if (rc2 != 0) return rc2;
+        ldlq_commit_update_sub16_kernel<<<(M + 7) / 8, 256, 0, st>>>(
+            w_sub_work, d_rb, ws_rec, code_tile_ptr, U_blk, U_blk_inv, G_pass, code_blk, M, s0);
+    }
+    return (int)cudaGetLastError();
+}
+
 
 // Diagonal v2 sub-block quantization via LUT (DP profile, `quantize_subs_lut_chunked`): one thread per sub-block of 16
 // weights, 64 candidates kept in registers, table rows (64 bucket values) read from L2 one per weight —
