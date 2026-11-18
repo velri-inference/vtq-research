@@ -1,7 +1,7 @@
-// VTQ v3 Super-Tile (`16 rows x 256 cols = 4,096 weights`) Galois-1024 (`nu = 10`) Trellis CPU AVX2 Benchmark
-// (`gcc -O3 -mavx2 -mfma -mno-avx512f src/cpu/vtq3_avx2_bench.c -lm -o vtq3_avx2_bench`)
+// VTQ Super-Tile (`16 rows x 256 cols = 4,096 weights`) Galois-1024 (`nu = 10`) Trellis CPU AVX2 Benchmark
+// (`gcc -O3 -mavx2 -mfma -mno-avx512f src/cpu/vtq_avx2_bench.c -lm -o vtq_avx2_bench`)
 //
-// Core VTQ v3 CPU AVX2 hardware innovations over VTQ v1 (TCQ) and VTQ v2:
+// Core VTQ CPU AVX2 hardware innovations over VTQ v1 (TCQ) and VTQ v2:
 //   1. `16x256` (`4,096`-weight) Natural-Column Super-Tile + 1024-State (`nu = 10`) Tail-Biting Trellis:
 //      - `16 KB` Native Little-Endian `uint16_t` `GF(2)` L1 LUT (`LH9[512][16]` `8 KB` + `L0[256][16]` `4 KB` + `L1[256][16]` `4 KB`):
 //        storing `c[g][r][0] = cols 8..15` and `c[g][r][1] = cols 0..7` lets x86-64 load all `9` history bits in a single
@@ -35,20 +35,20 @@
 #endif
 #define NSB (K_COLS / 256)
 
-// 16-byte naturally aligned `16x256` (`4,096`-weight) super-tile structs (zero padding, shared with GPU & `.vtq` v3):
+// 16-byte naturally aligned `16x256` (`4,096`-weight) super-tile structs (zero padding, shared with GPU & `.vtq`):
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B (1.00000 bpw, MSB-first per byte: c[g][r][0]=cols 0..7, c[g][r][1]=cols 8..15)
     uint8_t  ham[16][16];   //  256 B (0.50000 bpw, Gosset [8,4,4]: low nib=cols 0..7, high nib=cols 8..15)
     uint16_t hdr[16][1];    //   32 B (0.06250 bpw, h=1 gain bit per 16 weights: bit r = row r)
     uint8_t  u_sb[16];      //   16 B (0.03125 bpw, uint8 linear superblock row scale) ->  816 B = 1.59375 bpw
-} vtq3_st16_k15_t;
+} vtq_st16_k15_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
     uint8_t  usgn[16][32];  //  512 B ([0..15]=even rows 2*p bit p, [16..31]=odd rows 2*p+1 bit p)
     uint16_t hdr[16][1];    //   32 B (h=1)
     uint8_t  u_sb[16];      //   16 B -> 1072 B = 2.09375 bpw
-} vtq3_st16_k20_t;
+} vtq_st16_k20_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -56,7 +56,7 @@ typedef struct {
     uint8_t  ham[16][16];   //  256 B
     uint16_t hdr[16][1];    //   32 B (h=1)
     uint8_t  u_sb[16];      //   16 B -> 1328 B = 2.59375 bpw
-} vtq3_st16_k25_t;
+} vtq_st16_k25_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -64,7 +64,7 @@ typedef struct {
     uint8_t  ub0[16][32];   //  512 B
     uint16_t hdr[16][2];    //   64 B (h=2)
     uint8_t  u_sb[16];      //   16 B -> 1616 B = 3.15625 bpw
-} vtq3_st16_k30_t;
+} vtq_st16_k30_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -73,7 +73,7 @@ typedef struct {
     uint8_t  ham[16][16];   //  256 B
     uint16_t hdr[16][2];    //   64 B (h=2)
     uint8_t  u_sb[16];      //   16 B -> 1872 B = 3.65625 bpw
-} vtq3_st16_k35_t;
+} vtq_st16_k35_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -81,7 +81,7 @@ typedef struct {
     uint8_t  u2[16][2][32]; // 1024 B (u2[g][hp][16*odd + j] bits 2*q..2*q+1 for p = 4*hp + q)
     uint16_t hdr[16][3];    //   96 B (h=3)
     uint8_t  u_sb[16];      //   16 B -> 2160 B = 4.21875 bpw
-} vtq3_st16_k40_t;
+} vtq_st16_k40_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -90,7 +90,7 @@ typedef struct {
     uint8_t  ub2[16][32];   //  512 B
     uint16_t hdr[16][3];    //   96 B (h=3)
     uint8_t  u_sb[16];      //   16 B -> 2672 B = 5.21875 bpw
-} vtq3_st16_k50_t;
+} vtq_st16_k50_t;
 
 typedef struct {
     uint8_t  c[16][16][2];  //  512 B
@@ -98,16 +98,16 @@ typedef struct {
     uint8_t  u4[16][4][32]; // 2048 B (u4[g][p >> 1][16*odd + j] bits 4*(p&1)..4*(p&1)+3)
     uint16_t hdr[16][3];    //   96 B (h=3)
     uint8_t  u_sb[16];      //   16 B -> 3184 B = 6.21875 bpw
-} vtq3_st16_k60_t;
+} vtq_st16_k60_t;
 
-_Static_assert(sizeof(vtq3_st16_k15_t) ==  816, "st16_k15 size");
-_Static_assert(sizeof(vtq3_st16_k20_t) == 1072, "st16_k20 size");
-_Static_assert(sizeof(vtq3_st16_k25_t) == 1328, "st16_k25 size");
-_Static_assert(sizeof(vtq3_st16_k30_t) == 1616, "st16_k30 size");
-_Static_assert(sizeof(vtq3_st16_k35_t) == 1872, "st16_k35 size");
-_Static_assert(sizeof(vtq3_st16_k40_t) == 2160, "st16_k40 size");
-_Static_assert(sizeof(vtq3_st16_k50_t) == 2672, "st16_k50 size");
-_Static_assert(sizeof(vtq3_st16_k60_t) == 3184, "st16_k60 size");
+_Static_assert(sizeof(vtq_st16_k15_t) ==  816, "st16_k15 size");
+_Static_assert(sizeof(vtq_st16_k20_t) == 1072, "st16_k20 size");
+_Static_assert(sizeof(vtq_st16_k25_t) == 1328, "st16_k25 size");
+_Static_assert(sizeof(vtq_st16_k30_t) == 1616, "st16_k30 size");
+_Static_assert(sizeof(vtq_st16_k35_t) == 1872, "st16_k35 size");
+_Static_assert(sizeof(vtq_st16_k40_t) == 2160, "st16_k40 size");
+_Static_assert(sizeof(vtq_st16_k50_t) == 2672, "st16_k50 size");
+_Static_assert(sizeof(vtq_st16_k60_t) == 3184, "st16_k60 size");
 
 static const uint8_t HAM_CW8[16] __attribute__((aligned(16))) = {
     0x00, 0xff, 0xf0, 0x0f, 0xcc, 0x33, 0x3c, 0xc3,
@@ -145,7 +145,7 @@ static inline uint8_t pack_lb_bits(int lb, int lbits, const int pos[4]) {
 //   - `lut_mode == 2`: `AT2 (16B+16B)` `K=4, nl=16` (`lb` bits at `{2, 3, 4, 5}`, bit `7 == 0`).
 //   - `lut_mode == 3`: `AT2Z (32B+32B)` `K=5, nl=16` (`lb` bits at `{3, 7, 4, 6}` -> bit-7 zeroing for both `TA` and `TB`!).
 //   - `lut_mode == 4`: `AT2Z (32B+32B)` `K=6, nl=16` (`lb` bits at `{7, 4, 5, 6}` -> bit-7 zeroing for both `TA` and `TB`!).
-static void build_vtq3_luts(int ub, int nl, int lut_mode, int ham_bit_pos) {
+static void build_vtq_luts(int ub, int nl, int lut_mode, int ham_bit_pos) {
     int lbits = (nl == 4) ? 2 : ((nl == 8) ? 3 : 4);
     int pos[4] = {0, 0, 0, 0};
     if (lut_mode == 2) {
@@ -339,7 +339,7 @@ static inline void finish_half_y(float* y_half, const float* dr_half, const floa
 // =================================================================================================
 // Scalar Shift-Register Reference (verifies canonical `tab_canon`, MSB-first `c`, Gosset, `u2/u4`, `hdr`, `u_sb`)
 // =================================================================================================
-static void scalar_ref_vtq3(const void* ST_raw, size_t stride, const uint8_t* tab_canon,
+static void scalar_ref_vtq(const void* ST_raw, size_t stride, const uint8_t* tab_canon,
                             const uint8_t* gain_u8, const int8_t* a, const float* d_row_eff,
                             float* y, int fmt) {
     const int8_t* tab_s8 = (const int8_t*)tab_canon;
@@ -445,12 +445,12 @@ static void scalar_ref_vtq3(const void* ST_raw, size_t stride, const uint8_t* ta
 }
 
 // =================================================================================================
-// VTQ v3 CPU AVX2 Decode Kernels (`16x256` Super-Tile + Intra-Subblock `16x16` Trellis)
+// VTQ CPU AVX2 Decode Kernels (`16x256` Super-Tile + Intra-Subblock `16x16` Trellis)
 // =================================================================================================
 
 // 1. K = 1.5 Gosset [8,4,4] (`nl = 16, h = 1, tab_s8[32]`, 1.594 bpw)
 __attribute__((noinline))
-void vtq3_avx2_k15(const vtq3_st16_k15_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k15(const vtq_st16_k15_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                    const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i T1    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -461,7 +461,7 @@ void vtq3_avx2_k15(const vtq3_st16_k15_t* ST, const uint8_t* tab_avx, const uint
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k15_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k15_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -488,7 +488,7 @@ void vtq3_avx2_k15(const vtq3_st16_k15_t* ST, const uint8_t* tab_avx, const uint
 
 // 2. K = 2.0 (`nl = 16, h = 1, tab_u8[16]`, 2.094 bpw — single-pass `isum[8]`, zero redundant `usgn/a` loads!)
 __attribute__((noinline))
-void vtq3_avx2_k20(const vtq3_st16_k20_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k20(const vtq_st16_k20_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                    const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)tab_avx));
     const __m256i glut2 = _mm256_broadcastsi128_si256(_mm_loadl_epi64((const __m128i*)gain_u8));
@@ -499,7 +499,7 @@ void vtq3_avx2_k20(const vtq3_st16_k20_t* ST, const uint8_t* tab_avx, const uint
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k20_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k20_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -527,7 +527,7 @@ void vtq3_avx2_k20(const vtq3_st16_k20_t* ST, const uint8_t* tab_avx, const uint
 
 // 3. K = 2.5 Gosset [8,4,4] (`nl = 16, h = 1, tab_u8[32]`, 2.594 bpw)
 __attribute__((noinline))
-void vtq3_avx2_k25(const vtq3_st16_k25_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k25(const vtq_st16_k25_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                    const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i T1    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -539,7 +539,7 @@ void vtq3_avx2_k25(const vtq3_st16_k25_t* ST, const uint8_t* tab_avx, const uint
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k25_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k25_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -569,7 +569,7 @@ void vtq3_avx2_k25(const vtq3_st16_k25_t* ST, const uint8_t* tab_avx, const uint
 
 // 4. K = 3.0 Fast (`nl = 8, h = 2, tab_u8[16]`, 3.156 bpw — 1x `vpshufb`)
 __attribute__((noinline))
-void vtq3_avx2_k30_nl8(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k30_nl8(const vtq_st16_k30_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                        const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)tab_avx));
     const __m256i glut2 = _mm256_broadcastsi128_si256(_mm_loadl_epi64((const __m128i*)gain_u8));
@@ -581,7 +581,7 @@ void vtq3_avx2_k30_nl8(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const 
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k30_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k30_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -611,7 +611,7 @@ void vtq3_avx2_k30_nl8(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const 
 
 // 5. K = 3.0 HQ (`nl = 16, h = 2, tab_u8[32]`, 3.156 bpw — 2x `vpshufb` bit-7 zeroing)
 __attribute__((noinline))
-void vtq3_avx2_k30_nl16(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k30_nl16(const vtq_st16_k30_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                         const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i T1    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -623,7 +623,7 @@ void vtq3_avx2_k30_nl16(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k30_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k30_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -654,7 +654,7 @@ void vtq3_avx2_k30_nl16(const vtq3_st16_k30_t* ST, const uint8_t* tab_avx, const
 
 // 6. K = 3.5 Gosset [8,4,4] (`nl = 16, h = 2, AT2 16B+16B`, 3.656 bpw — dual-nibble `2x vpshufb + vpaddusb`)
 __attribute__((noinline))
-void vtq3_avx2_k35(const vtq3_st16_k35_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k35(const vtq_st16_k35_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                    const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i TA0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i TB0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -668,7 +668,7 @@ void vtq3_avx2_k35(const vtq3_st16_k35_t* ST, const uint8_t* tab_avx, const uint
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k35_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k35_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -702,7 +702,7 @@ void vtq3_avx2_k35(const vtq3_st16_k35_t* ST, const uint8_t* tab_avx, const uint
 
 // 7. K = 4.0 (`nl = 16, h = 3, AT2 16B+16B`, 4.219 bpw — dual-nibble `2x vpshufb + vpaddusb`)
 __attribute__((noinline))
-void vtq3_avx2_k40(const vtq3_st16_k40_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k40(const vtq_st16_k40_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                    const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i TA0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i TB0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -716,7 +716,7 @@ void vtq3_avx2_k40(const vtq3_st16_k40_t* ST, const uint8_t* tab_avx, const uint
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k40_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k40_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -751,7 +751,7 @@ void vtq3_avx2_k40(const vtq3_st16_k40_t* ST, const uint8_t* tab_avx, const uint
 
 // 8. K = 5.0 Fast (`nl = 4, h = 3, tab_u8[32]`, 5.219 bpw — 2x `vpshufb` bit-7 zeroing)
 __attribute__((noinline))
-void vtq3_avx2_k50_nl4(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k50_nl4(const vtq_st16_k50_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                        const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i T0    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i T1    = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -765,7 +765,7 @@ void vtq3_avx2_k50_nl4(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const 
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k50_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k50_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -800,7 +800,7 @@ void vtq3_avx2_k50_nl4(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const 
 
 // 9. K = 5.0 HQ (`nl = 16, h = 3, AT2Z 32B+32B`, 5.219 bpw — 4x `vpshufb` bit-7 zeroing, 0 `vpblendvb`!)
 __attribute__((noinline))
-void vtq3_avx2_k50_nl16(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k50_nl16(const vtq_st16_k50_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                         const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i TA0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i TA1   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -816,7 +816,7 @@ void vtq3_avx2_k50_nl16(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k50_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k50_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -854,7 +854,7 @@ void vtq3_avx2_k50_nl16(const vtq3_st16_k50_t* ST, const uint8_t* tab_avx, const
 
 // 10. K = 6.0 (`nl = 16, h = 3, AT2Z 32B+32B`, 6.219 bpw — packed `u4[16][4][32]` + bit-7 zeroing, 0 `vpblendvb`!)
 __attribute__((noinline))
-void vtq3_avx2_k60_nl16(const vtq3_st16_k60_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
+void vtq_avx2_k60_nl16(const vtq_st16_k60_t* ST, const uint8_t* tab_avx, const uint8_t* gain_u8,
                         const int8_t* a, const float* d_row_eff, float* y) {
     const __m256i TA0   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 0)));
     const __m256i TA1   = _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i*)(tab_avx + 16)));
@@ -870,7 +870,7 @@ void vtq3_avx2_k60_nl16(const vtq3_st16_k60_t* ST, const uint8_t* tab_avx, const
     for (int bg = 0; bg < M_ROWS / 16; bg++) {
         float acc_f[8][8] __attribute__((aligned(32))) = {{0}};
         for (int sb = 0; sb < NSB; sb++) {
-            const vtq3_st16_k60_t* t = &ST[bg * NSB + sb];
+            const vtq_st16_k60_t* t = &ST[bg * NSB + sb];
             __m256i isum[8]; for (int p = 0; p < 8; p++) isum[p] = zero;
             for (int g = 0; g < 16; g++) {
                 const uint8_t* cb_cur = (const uint8_t*)t->c[g];
@@ -938,14 +938,14 @@ static double rel_l2_err(const float* y, const float* ref, int n) {
 
 int main(void) {
     const int nst = (M_ROWS / 16) * NSB;
-    vtq3_st16_k15_t* S15 = aligned_alloc(64, (size_t)nst * sizeof(*S15));
-    vtq3_st16_k20_t* S20 = aligned_alloc(64, (size_t)nst * sizeof(*S20));
-    vtq3_st16_k25_t* S25 = aligned_alloc(64, (size_t)nst * sizeof(*S25));
-    vtq3_st16_k30_t* S30 = aligned_alloc(64, (size_t)nst * sizeof(*S30));
-    vtq3_st16_k35_t* S35 = aligned_alloc(64, (size_t)nst * sizeof(*S35));
-    vtq3_st16_k40_t* S40 = aligned_alloc(64, (size_t)nst * sizeof(*S40));
-    vtq3_st16_k50_t* S50 = aligned_alloc(64, (size_t)nst * sizeof(*S50));
-    vtq3_st16_k60_t* S60 = aligned_alloc(64, (size_t)nst * sizeof(*S60));
+    vtq_st16_k15_t* S15 = aligned_alloc(64, (size_t)nst * sizeof(*S15));
+    vtq_st16_k20_t* S20 = aligned_alloc(64, (size_t)nst * sizeof(*S20));
+    vtq_st16_k25_t* S25 = aligned_alloc(64, (size_t)nst * sizeof(*S25));
+    vtq_st16_k30_t* S30 = aligned_alloc(64, (size_t)nst * sizeof(*S30));
+    vtq_st16_k35_t* S35 = aligned_alloc(64, (size_t)nst * sizeof(*S35));
+    vtq_st16_k40_t* S40 = aligned_alloc(64, (size_t)nst * sizeof(*S40));
+    vtq_st16_k50_t* S50 = aligned_alloc(64, (size_t)nst * sizeof(*S50));
+    vtq_st16_k60_t* S60 = aligned_alloc(64, (size_t)nst * sizeof(*S60));
 
     fill_rand_bytes(S15, (size_t)nst * sizeof(*S15), 0x1515A5A5u);
     fill_rand_bytes(S20, (size_t)nst * sizeof(*S20), 0x2020A5A5u);
@@ -989,16 +989,16 @@ int main(void) {
     for (int i = 0; i < M_ROWS; i++) dr[i] = (0.0005f + 0.0002f * (i & 7)) * (1.0f / 64.0f);
 
     const int iters = (M_ROWS * K_COLS >= 1000000) ? 400 : 1200;
-    printf("=== VTQ v3 16x256 Super-Tile CPU AVX2 Benchmark (M=%d, K=%d, -mno-avx512f) ===\n", M_ROWS, K_COLS);
+    printf("=== VTQ 16x256 Super-Tile CPU AVX2 Benchmark (M=%d, K=%d, -mno-avx512f) ===\n", M_ROWS, K_COLS);
 
     #define BENCH_ONE(label, fmt_id, ub_b, nl_v, lut_m, ham_pos, tab_src, fn, st_ptr) do { \
-        build_vtq3_luts((ub_b), (nl_v), (lut_m), (ham_pos)); \
+        build_vtq_luts((ub_b), (nl_v), (lut_m), (ham_pos)); \
         if ((fmt_id) == 15 || (fmt_id) == 25) memcpy(tab_avx, (tab_src), 32); \
         else if ((lut_m) == 2) { memcpy(tab_avx, ta16, 16); memcpy(tab_avx + 16, tb16, 16); } \
         else if ((lut_m) == 3) { prepare_at2z_k5_for_avx2(ta32, tb32, tab_avx); } \
         else if ((lut_m) == 4) { memcpy(tab_avx, ta32, 32); memcpy(tab_avx + 32, tb32, 32); } \
         else permute_tab_for_avx2((tab_src), tab_avx, (ub_b), (nl_v)); \
-        scalar_ref_vtq3((st_ptr), sizeof(*(st_ptr)), (tab_src), gain_u8, a, dr, y_ref, (fmt_id)); \
+        scalar_ref_vtq((st_ptr), sizeof(*(st_ptr)), (tab_src), gain_u8, a, dr, y_ref, (fmt_id)); \
         fn((st_ptr), tab_avx, gain_u8, a, dr, y); \
         double err = rel_l2_err(y, y_ref, M_ROWS); \
         for (int w = 0; w < 40; w++) { fn((st_ptr), tab_avx, gain_u8, a, dr, y); __asm__ volatile("" ::: "memory"); } \
@@ -1012,16 +1012,16 @@ int main(void) {
         if (err >= 1e-6) return 1; \
     } while (0)
 
-    BENCH_ONE("VTQ3 K=1.5 nl=16 (Gosset s8)",   15, 0, 16, 0,  7, tab_s8_canon, vtq3_avx2_k15,      S15);
-    BENCH_ONE("VTQ3 K=2.0 nl=16 (16-ent)",      20, 0, 16, 0, -1, tab_u8_canon, vtq3_avx2_k20,      S20);
-    BENCH_ONE("VTQ3 K=2.5 nl=16 (Gosset)",      25, 0, 16, 0,  7, tab_u8_canon, vtq3_avx2_k25,      S25);
-    BENCH_ONE("VTQ3 K=3.0 nl=8  (16-ent fast)", 30, 1,  8, 0, -1, tab_u8_canon, vtq3_avx2_k30_nl8,  S30);
-    BENCH_ONE("VTQ3 K=3.0 nl=16 (32-ent HQ)",   31, 1, 16, 0, -1, tab_u8_canon, vtq3_avx2_k30_nl16, S30);
-    BENCH_ONE("VTQ3 K=3.5 nl=16 (Gosset AT2)",  35, 2, 16, 2,  0, tab_at2_k4,   vtq3_avx2_k35,      S35);
-    BENCH_ONE("VTQ3 K=4.0 nl=16 (AT2 16+16)",   40, 2, 16, 2, -1, tab_at2_k4,   vtq3_avx2_k40,      S40);
-    BENCH_ONE("VTQ3 K=5.0 nl=4  (32-ent fast)", 50, 3,  4, 0, -1, tab_u8_canon, vtq3_avx2_k50_nl4,  S50);
-    BENCH_ONE("VTQ3 K=5.0 nl=16 (AT2Z 32+32)",  51, 3, 16, 3, -1, tab_at2z_k5,  vtq3_avx2_k50_nl16, S50);
-    BENCH_ONE("VTQ3 K=6.0 nl=16 (AT2Z 32+32)",  60, 4, 16, 4, -1, tab_at2z_k6,  vtq3_avx2_k60_nl16, S60);
+    BENCH_ONE("VTQ K=1.5 nl=16 (Gosset s8)",   15, 0, 16, 0,  7, tab_s8_canon, vtq_avx2_k15,      S15);
+    BENCH_ONE("VTQ K=2.0 nl=16 (16-ent)",      20, 0, 16, 0, -1, tab_u8_canon, vtq_avx2_k20,      S20);
+    BENCH_ONE("VTQ K=2.5 nl=16 (Gosset)",      25, 0, 16, 0,  7, tab_u8_canon, vtq_avx2_k25,      S25);
+    BENCH_ONE("VTQ K=3.0 nl=8  (16-ent fast)", 30, 1,  8, 0, -1, tab_u8_canon, vtq_avx2_k30_nl8,  S30);
+    BENCH_ONE("VTQ K=3.0 nl=16 (32-ent HQ)",   31, 1, 16, 0, -1, tab_u8_canon, vtq_avx2_k30_nl16, S30);
+    BENCH_ONE("VTQ K=3.5 nl=16 (Gosset AT2)",  35, 2, 16, 2,  0, tab_at2_k4,   vtq_avx2_k35,      S35);
+    BENCH_ONE("VTQ K=4.0 nl=16 (AT2 16+16)",   40, 2, 16, 2, -1, tab_at2_k4,   vtq_avx2_k40,      S40);
+    BENCH_ONE("VTQ K=5.0 nl=4  (32-ent fast)", 50, 3,  4, 0, -1, tab_u8_canon, vtq_avx2_k50_nl4,  S50);
+    BENCH_ONE("VTQ K=5.0 nl=16 (AT2Z 32+32)",  51, 3, 16, 3, -1, tab_at2z_k5,  vtq_avx2_k50_nl16, S50);
+    BENCH_ONE("VTQ K=6.0 nl=16 (AT2Z 32+32)",  60, 4, 16, 4, -1, tab_at2z_k6,  vtq_avx2_k60_nl16, S60);
 
     free(S15); free(S20); free(S25); free(S30); free(S35); free(S40); free(S50); free(S60);
     free(a); free(dr); free(y); free(y_ref);

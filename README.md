@@ -33,7 +33,9 @@ Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration,
 
 | Path | Contents |
 | --- | --- |
-| `src/liqk_v2.py` | quantizer: formats (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices, `.vtq` packing mode (`PACK`) |
+| `src/vtq.py`, `src/vtq_format.py`, `docs/RU/vtq-format.md` | **VTQ** (*Velri Trellis Quant*, `.vtq`): `16×256` super-tile format, quantizer, `.vtq` container (`VtqWriter` / `VtqFile`), and specification |
+| `src/cpu/vtq_avx2_bench.c`, `src/cuda/vtq_matvec_bench.cu` | **VTQ** single-thread AVX2 and Blackwell `sm_120` FP32 / DP4A GEMV & GEMM decode kernels |
+| `src/liqk_v2.py` | earlier prototype quantizer (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices |
 | `src/tcq_proto.py`, `src/cuda/tcq_viterbi.cu` | Viterbi (torch reference and CUDA), table training, Gaussian rig |
 | `src/ltq_format.py`, `src/ltq_file.py` | format reference (tile, decode, self-test) and the `.vtq` container (write, read, full decode) |
 | `src/hybrid_quant.py`, `src/streaming_quant.py` | layer-wise quantizers and evaluators for models that don't fit on the GPU, with any layer types; comparison with off-the-shelf GGUF and EXL3 |
@@ -49,7 +51,7 @@ Python with torch (CUDA) and transformers; the CUDA Viterbi needs `nvcc` in `/us
 `data/` is not part of the repository: traces and calibration sets are derived from external datasets and are built by `src/prepare_traces.py`; Fisher weights are recomputed by `src/fisher_full.py` / `src/fisher_offload.py`. Models and quants are local as well.
 
 ```bash
-python -m src.ltq_format        # format self-test (requires a GPU)
-python -m src.hybrid_quant --model_dir <bf16> --data_dir data/<model> --fisher data/<model>/fisher.pt \
-    --methods dp:TCQPQ:3.5 --out results/<name>.json
+python -m src.vtq_format        # VTQ format & .vtq container self-test
+python -m src.run_vtq_benchmarks --suite speed
+python -m src.run_vtq_benchmarks --suite 3b
 ```

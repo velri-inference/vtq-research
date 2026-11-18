@@ -1,8 +1,8 @@
 """
-Reference implementation of the VTQ v3 format and `.vtq` v3 binary container (`src/vtq_v3_format.py`):
+Reference implementation of the VTQ format and `.vtq` binary container (`src/vtq_format.py`):
   1. `16 rows x 256 cols = 4,096 weights` Natural-Column Super-Tile (`SUPER_ROWS = 16`, `TILE = 256`):
-     - Shared byte-for-byte across CPU AVX2 (`src/cpu/vtq3_avx2_bench.c`), GPU Joint-1024 (`src/cuda/vtq3_matvec_bench.cu`),
-       and the `.vtq` v3 container (`Vtq3Writer` / `Vtq3File`), with zero column permutations (`0..255` natural order)
+     - Shared byte-for-byte across CPU AVX2 (`src/cpu/vtq_avx2_bench.c`), GPU Joint-1024 (`src/cuda/vtq_matvec_bench.cu`),
+       and the `.vtq` container (`VtqWriter` / `VtqFile`), with zero column permutations (`0..255` natural order)
        and native little-endian `uint16_t` `c[16][16][2]` (`c[g][r][0] = cols 8..15`, `c[g][r][1] = cols 0..7`).
   2. 1024-state (`nu = 10`) Tail-Biting Shift-Register Trellis (`9` history bits in `*(uint16_t*)c[15][r] & 0x1FF`)
      with optimal Ungerboeck GF(2) subset label maps:
@@ -44,7 +44,7 @@ from src.vtq_v2_format import (
 TILE = 256
 SUPER_ROWS = 16
 MAGIC = b"VTQ\0"
-VERSION = 3
+VERSION = 1
 
 TAB_UNIT = np.float32(1.0 / 64.0)
 GAIN_UNIT = np.float32(1.0 / 64.0)
@@ -53,28 +53,28 @@ U_SB_UNIT = np.float32(1.0 / 128.0)
 # Format metadata: fmt_code -> (K_base, frac, nl, h, st_bytes for 16x256 = 4,096 weights)
 # `frac`: 0=plain, 1=Gosset[8,4,4] (-0.50 bpw), 2=D4[4,3,2] (-0.25 bpw), 3=D4_eq[4,1,4] (-0.75 bpw)
 FMT_META: dict[int, tuple[int, int, int, int, int]] = {
-    15: (2, 1, 16, 1,  816),  # 1.59375 bpw (vtq3_st16_k15_t, s8_32)
+    15: (2, 1, 16, 1,  816),  # 1.59375 bpw (vtq_st16_k15_t, s8_32)
     17: (2, 2, 16, 1,  944),  # 1.84375 bpw (s8_32)
-    20: (2, 0, 16, 1, 1072),  # 2.09375 bpw (vtq3_st16_k20_t, u8 16B)
+    20: (2, 0, 16, 1, 1072),  # 2.09375 bpw (vtq_st16_k20_t, u8 16B)
     22: (3, 3, 16, 1, 1200),  # 2.34375 bpw (u8 32B)
-    25: (3, 1, 16, 1, 1328),  # 2.59375 bpw (vtq3_st16_k25_t, h=1, u8 32B)
-    24: (3, 1, 16, 2, 1360),  # 2.65625 bpw (VTQ3_250_H2, h=2, u8 32B)
-    26: (3, 2, 16, 1, 1456),  # 2.84375 bpw (VTQ3_275, h=1, u8 32B)
-    27: (3, 2, 16, 2, 1488),  # 2.90625 bpw (VTQ3_275_H2, h=2, u8 32B)
-    30: (3, 0,  8, 2, 1616),  # 3.15625 bpw (vtq3_st16_k30_t, nl=8 fast, u8 16B)
-    31: (3, 0, 16, 2, 1616),  # 3.15625 bpw (vtq3_st16_k30_t, nl=16 HQ, u8 32B)
+    25: (3, 1, 16, 1, 1328),  # 2.59375 bpw (vtq_st16_k25_t, h=1, u8 32B)
+    24: (3, 1, 16, 2, 1360),  # 2.65625 bpw (VTQ_250_H2, h=2, u8 32B)
+    26: (3, 2, 16, 1, 1456),  # 2.84375 bpw (VTQ_275, h=1, u8 32B)
+    27: (3, 2, 16, 2, 1488),  # 2.90625 bpw (VTQ_275_H2, h=2, u8 32B)
+    30: (3, 0,  8, 2, 1616),  # 3.15625 bpw (vtq_st16_k30_t, nl=8 fast, u8 16B)
+    31: (3, 0, 16, 2, 1616),  # 3.15625 bpw (vtq_st16_k30_t, nl=16 HQ, u8 32B)
     32: (4, 3, 16, 2, 1744),  # 3.40625 bpw (nl=16, at2_16_16 32B)
-    35: (4, 1, 16, 2, 1872),  # 3.65625 bpw (vtq3_st16_k35_t, nl=16, at2_16_16 32B)
+    35: (4, 1, 16, 2, 1872),  # 3.65625 bpw (vtq_st16_k35_t, nl=16, at2_16_16 32B)
     37: (4, 2, 16, 2, 2000),  # 3.90625 bpw (nl=16, at2_16_16 32B)
-    40: (4, 0, 16, 3, 2160),  # 4.21875 bpw (vtq3_st16_k40_t, nl=16, at2_16_16 32B)
+    40: (4, 0, 16, 3, 2160),  # 4.21875 bpw (vtq_st16_k40_t, nl=16, at2_16_16 32B)
     42: (5, 3, 16, 2, 2256),  # 4.40625 bpw (nl=16, at2z_32_32 64B)
     45: (5, 1, 16, 2, 2384),  # 4.65625 bpw (nl=16, at2z_32_32 64B)
     47: (5, 2, 16, 2, 2512),  # 4.90625 bpw (nl=16, at2z_32_32 64B)
-    50: (5, 0,  4, 3, 2672),  # 5.21875 bpw (vtq3_st16_k50_t, nl=4 fast, u8 32B)
-    51: (5, 0, 16, 3, 2672),  # 5.21875 bpw (vtq3_st16_k50_t, nl=16 HQ, at2z_32_32 64B)
+    50: (5, 0,  4, 3, 2672),  # 5.21875 bpw (vtq_st16_k50_t, nl=4 fast, u8 32B)
+    51: (5, 0, 16, 3, 2672),  # 5.21875 bpw (vtq_st16_k50_t, nl=16 HQ, at2z_32_32 64B)
     55: (6, 1, 16, 3, 2928),  # 5.71875 bpw (nl=16, at2z_32_32 64B)
     57: (6, 2, 16, 3, 3056),  # 5.96875 bpw (nl=16, at2z_32_32 64B)
-    60: (6, 0, 16, 3, 3184),  # 6.21875 bpw (vtq3_st16_k60_t, nl=16, at2z_32_32 64B)
+    60: (6, 0, 16, 3, 3184),  # 6.21875 bpw (vtq_st16_k60_t, nl=16, at2z_32_32 64B)
 }
 
 _OUTER_KRON_CACHE: dict[tuple[int, torch.device], tuple[int, int, int, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
@@ -93,7 +93,7 @@ _GALOIS_LUT: dict[int, np.ndarray] = {
 }
 
 
-def galois_lb_vtq3(st: np.ndarray, nl: int) -> np.ndarray:
+def galois_lb_vtq(st: np.ndarray, nl: int) -> np.ndarray:
     """Optimal 1024-state (`nu = 10`, 9 history bits) Ungerboeck GF(2) subset label map matching C AVX2 & CUDA Joint-1024."""
     return _GALOIS_LUT[nl][np.asarray(st, dtype=np.uint16) & 0x3FF]
 
@@ -112,7 +112,7 @@ def _get_outer_kron_factors(K: int, device: torch.device):
     return _OUTER_KRON_CACHE[key]
 
 
-def apply_vtq3_rot(X: torch.Tensor, rot_block: int = -1, transpose: bool = False) -> torch.Tensor:
+def apply_vtq_rot(X: torch.Tensor, rot_block: int = -1, transpose: bool = False) -> torch.Tensor:
     """Applies `R_K^{outer} = DCT-II_q (x) H_{2^a}` (`rot_block = -1`), `Inner-DCT` (`-2`), or Block-FWHT (`> 0`)."""
     K = X.shape[-1]
     if rot_block > 0:
@@ -141,7 +141,7 @@ def apply_vtq3_rot(X: torch.Tensor, rot_block: int = -1, transpose: bool = False
             torch.backends.cuda.matmul.allow_tf32 = True
 
 
-def _at2_indices_vtq3(K_base: int, nl: int, tp: str) -> tuple[np.ndarray, np.ndarray]:
+def _at2_indices_vtq(K_base: int, nl: int, tp: str) -> tuple[np.ndarray, np.ndarray]:
     """Maps `(u_mag, lb)` -> `(idxA, idxB)` of shape `(U // 2, nl)` (`idx_canon = (u_mag * nl) | lb`)."""
     u_cnt = 1 << max(K_base - 2, 0)
     ul = np.arange(u_cnt, dtype=np.int64)[:, None]
@@ -157,7 +157,7 @@ def _at2_indices_vtq3(K_base: int, nl: int, tp: str) -> tuple[np.ndarray, np.nda
     raise ValueError(f"Unsupported additive codebook type={tp!r} for K={K_base}, nl={nl}")
 
 
-def hw_to_canon_u8_vtq3(fmt_code: int, hw: dict) -> np.ndarray:
+def hw_to_canon_u8_vtq(fmt_code: int, hw: dict) -> np.ndarray:
     """Expands `hw_codebook` (`u8`, `at2_16_16`, or `at2z_32_32`) to canonical `uint8 [nl * (U // 2)]` (`(u_mag * nl) | lb`)."""
     K_base, _, nl, _, _ = FMT_META[fmt_code]
     U = 1 << (K_base - 1)
@@ -171,14 +171,14 @@ def hw_to_canon_u8_vtq3(fmt_code: int, hw: dict) -> np.ndarray:
         assert tab_u8.shape == (m_mag,), f"Expected tab_u8 shape ({m_mag},), got {tab_u8.shape}"
         return tab_u8
     if tp in ("at2_16_16", "at2z_32_32"):
-        idxA, idxB = _at2_indices_vtq3(K_base, nl, tp)
+        idxA, idxB = _at2_indices_vtq(K_base, nl, tp)
         ta = np.asarray(hw["TA_u8"], dtype=np.int32)
         tb = np.asarray(hw["TB_u8"], dtype=np.int32)
         return np.clip(ta[idxA] + tb[idxB], 0, qmax).astype(np.uint8).reshape(m_mag)
-    raise ValueError(f"Unknown VTQ v3 hw_codebook type: {tp!r}")
+    raise ValueError(f"Unknown VTQ hw_codebook type: {tp!r}")
 
 
-def reconstruct_lut_from_hw_vtq3(fmt_code: int, hw: dict) -> np.ndarray:
+def reconstruct_lut_from_hw_vtq(fmt_code: int, hw: dict) -> np.ndarray:
     """Deterministically reconstructs exact dyadic `float32 [nl * U]` table from `s8_32`, `u8`, `at2_16_16`, or `at2z_32_32`."""
     K_base, _, nl, _, _ = FMT_META[fmt_code]
     U = 1 << (K_base - 1)
@@ -193,7 +193,7 @@ def reconstruct_lut_from_hw_vtq3(fmt_code: int, hw: dict) -> np.ndarray:
         return out.reshape(-1)
 
     m_mag = nl * (U // 2)
-    tab_u8 = hw_to_canon_u8_vtq3(fmt_code, hw)
+    tab_u8 = hw_to_canon_u8_vtq(fmt_code, hw)
     assert tab_u8.shape == (m_mag,), f"Expected tab_u8 shape ({m_mag},), got {tab_u8.shape}"
     u_mag_mask = (1 << (K_base - 2)) - 1
     for lb in range(nl):
@@ -207,7 +207,7 @@ def reconstruct_lut_from_hw_vtq3(fmt_code: int, hw: dict) -> np.ndarray:
 
 
 @dataclass(frozen=True)
-class Vtq3Format:
+class VtqFormat:
     name: str
     fmt_code: int         # 15..60
     K: int                # base integer bits (2..6)
@@ -238,18 +238,18 @@ class Vtq3Format:
         return self.st_bytes * 8.0 / 4096.0 + 16.0 / k_cols + 16.0 / m_rows
 
 
-def load_vtq3_formats(tables_path: Path | None = None, menu: list[str] | None = None) -> dict[str, Vtq3Format]:
+def load_vtq_formats(tables_path: Path | None = None, menu: list[str] | None = None) -> dict[str, VtqFormat]:
     if tables_path is None:
-        tables_path = Path(__file__).resolve().parent.parent / "results" / "vtq_v3_tables.json"
+        tables_path = Path(__file__).resolve().parent.parent / "results" / "vtq_tables.json"
     raw = json.loads(Path(tables_path).read_text(encoding="utf-8"))
     names = menu if menu is not None else list(raw.keys())
-    out: dict[str, Vtq3Format] = {}
+    out: dict[str, VtqFormat] = {}
     for nm in names:
-        out[nm] = format_from_json_vtq3(dict(raw[nm], name=nm))
+        out[nm] = format_from_json_vtq(dict(raw[nm], name=nm))
     return out
 
 
-def format_json_vtq3(f: Vtq3Format) -> dict:
+def format_json_vtq(f: VtqFormat) -> dict:
     return {
         "name": f.name,
         "fmt_code": f.fmt_code,
@@ -259,13 +259,13 @@ def format_json_vtq3(f: Vtq3Format) -> dict:
     }
 
 
-def format_from_json_vtq3(d: dict) -> Vtq3Format:
+def format_from_json_vtq(d: dict) -> VtqFormat:
     fc = int(d["fmt_code"])
     K, gosset, nl, h, _ = FMT_META[fc]
     hw = dict(d["hw_codebook"])
     g_raw = d.get("gain_u8", d.get("gain_i"))
     gain_u8 = np.clip(np.asarray(g_raw, dtype=np.int32), 1, 255).astype(np.uint8)
-    return Vtq3Format(
+    return VtqFormat(
         name=d["name"],
         fmt_code=fc,
         K=K,
@@ -275,14 +275,14 @@ def format_from_json_vtq3(d: dict) -> Vtq3Format:
         sub=16,
         hw_codebook=hw,
         gain_u8=gain_u8,
-        lut=reconstruct_lut_from_hw_vtq3(fc, hw),
+        lut=reconstruct_lut_from_hw_vtq(fc, hw),
         gain_tab=gain_u8.astype(np.float32) * GAIN_UNIT,
         scale=float(d.get("scale", 1.0)),
     )
 
 
 # ------------------------------------------------------------------------------------------------
-# Vectorized `16x256` Super-Tile Packing & Reference Decoding (`vtq3_st16_k15_t .. vtq3_st16_k60_t`)
+# Vectorized `16x256` Super-Tile Packing & Reference Decoding (`vtq_st16_k15_t .. vtq_st16_k60_t`)
 # ------------------------------------------------------------------------------------------------
 
 def _pack_eo_plane(bits: np.ndarray) -> np.ndarray:
@@ -424,14 +424,14 @@ def _unpack_lsb16(buf: np.ndarray, off: int, frac: int, nbg: int, nsb: int) -> t
     raise ValueError(f"Unsupported frac={frac}")
 
 
-def pack_supertiles_vtq3(
+def pack_supertiles_vtq(
     c_all: np.ndarray,    # uint8 [M, nsb, 16, 2] (MSB-first coded byte per g=0..15, [0]=cols 0..7, [1]=cols 8..15)
     u_all: np.ndarray,    # uint8 [M, nsb, 256] (natural column order 0..255)
     g_sub: np.ndarray,    # uint8 [M, nsb, 16] (gain index per g=0..15)
     u_sb: np.ndarray,     # uint8 [M, nsb] (linear superblock scale 0..255)
-    fmt: Vtq3Format,
+    fmt: VtqFormat,
 ) -> np.ndarray:
-    """Packs `[M, nsb]` quantized superblocks into contiguous `vtq3_st16_k*_t` bytes (pads `M` to `% 16 == 0` if needed)."""
+    """Packs `[M, nsb]` quantized superblocks into contiguous `vtq_st16_k*_t` bytes (pads `M` to `% 16 == 0` if needed)."""
     M, nsb, g_dim, c_dim = c_all.shape
     assert g_dim == 16 and c_dim == 2, f"Expected c_all [M, nsb, 16, 2], got {c_all.shape}"
     M_pad = _align(M, SUPER_ROWS)
@@ -491,14 +491,14 @@ def pack_supertiles_vtq3(
     return np.ascontiguousarray(packed.reshape(-1))
 
 
-def decode_supertiles_vtq3(
+def decode_supertiles_vtq(
     raw: bytes | memoryview | np.ndarray,
     M: int,
     K: int,
-    fmt: Vtq3Format,
+    fmt: VtqFormat,
     d_row: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Vectorized reference decoder from `vtq3_st16_k*_t` bytes to `float32 [M, K]` (natural column order)."""
+    """Vectorized reference decoder from `vtq_st16_k*_t` bytes to `float32 [M, K]` (natural column order)."""
     assert K % TILE == 0
     M_pad = _align(M, SUPER_ROWS)
     nbg, nsb = M_pad // SUPER_ROWS, K // TILE
@@ -515,7 +515,7 @@ def decode_supertiles_vtq3(
     for step in range(256):
         st = ((st << 1) | c_bits[..., step].astype(np.uint16)) & 0x3FF
         st_seq[..., step] = st
-    lb_grj = galois_lb_vtq3(st_seq, fmt.nl).reshape(nbg, nsb, 16, 16, 16).astype(np.int32)
+    lb_grj = galois_lb_vtq(st_seq, fmt.nl).reshape(nbg, nsb, 16, 16, 16).astype(np.int32)
 
     if fc in (15, 17):
         u_grj, _ = _unpack_lsb16(buf, 512, fmt.gosset, nbg, nsb)
@@ -565,27 +565,27 @@ def decode_supertiles_vtq3(
     return W_out
 
 
-def assemble_vtq3(
+def assemble_vtq(
     G_nat: torch.Tensor,   # float32 [M, K] in natural column order (`gains * tab`)
     d_row: torch.Tensor,   # float16 [M]
     u_sb: torch.Tensor,    # uint8 [M, K // 256]
     suh: torch.Tensor,     # float16 [K]
     rot_block: int = -1,
 ) -> torch.Tensor:
-    """Reconstructs `W_hat [M, K]` bit-identically to `Vtq3File.decode_matrix`."""
+    """Reconstructs `W_hat [M, K]` bit-identically to `VtqFile.decode_matrix`."""
     M, K = G_nat.shape
     nsb = K // TILE
     d_eff = d_row.float().unsqueeze(1) * (u_sb.float() * float(U_SB_UNIT))
     W_rot = (G_nat.view(M, nsb, TILE) * d_eff.unsqueeze(-1)).reshape(M, K)
-    return apply_vtq3_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
+    return apply_vtq_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
 
 
 # ------------------------------------------------------------------------------------------------
-# `.vtq` v3 Binary Container (`Vtq3Writer` & `Vtq3File`)
+# `.vtq` Binary Container (`VtqWriter` & `VtqFile`)
 # ------------------------------------------------------------------------------------------------
 
-class Vtq3Writer:
-    def __init__(self, path: Path, formats: list[Vtq3Format], reserve: int = (4 << 20) - 16):
+class VtqWriter:
+    def __init__(self, path: Path, formats: list[VtqFormat], reserve: int = (4 << 20) - 16):
         self.f = open(path, "w+b")
         self.reserve = _align(16 + reserve, 64) - 16
         self.data_off = 16 + self.reserve
@@ -615,7 +615,7 @@ class Vtq3Writer:
         self.add_bytes(name, arr, dt, list(t.shape))
 
     def add_matrix(self, prefix: str, m: dict, verify: bool = True):
-        """Writes a quantized VTQ v3 matrix (`row_slices`, `c_all`, `u_all`, `g_sub`, `u_sb`, `d_row`, `suh`, `rot_block`)."""
+        """Writes a quantized VTQ matrix (`row_slices`, `c_all`, `u_all`, `g_sub`, `u_sb`, `d_row`, `suh`, `rot_block`)."""
         c_np = m["c_all"].cpu().numpy() if isinstance(m["c_all"], torch.Tensor) else m["c_all"]
         u_np = m["u_all"].cpu().numpy() if isinstance(m["u_all"], torch.Tensor) else m["u_all"]
         g_np = m["g_sub"].cpu().numpy() if isinstance(m["g_sub"], torch.Tensor) else m["g_sub"]
@@ -629,22 +629,22 @@ class Vtq3Writer:
         for r0, r1, name in m["row_slices"]:
             fi = self.fmt_idx[name]
             fmt = self.formats[fi]
-            b = pack_supertiles_vtq3(c_np[r0:r1], u_np[r0:r1], g_np[r0:r1], usb_np[r0:r1], fmt).tobytes()
+            b = pack_supertiles_vtq(c_np[r0:r1], u_np[r0:r1], g_np[r0:r1], usb_np[r0:r1], fmt).tobytes()
             pad = (-len(b)) & 63
             blobs.append(b + b"\0" * pad)
             meta.append([r0, r1, fi, off, rot_block])
             off += len(b) + pad
             if verify and "W_hat_rot" in m:
-                dec = decode_supertiles_vtq3(b, r1 - r0, K, fmt, d_row=d_row_np[r0:r1])
+                dec = decode_supertiles_vtq(b, r1 - r0, K, fmt, d_row=d_row_np[r0:r1])
                 ref = m["W_hat_rot"][r0:r1].cpu().numpy()
                 if not np.allclose(dec, ref, atol=1e-6, rtol=1e-6):
                     mx = float(np.max(np.abs(dec - ref)))
                     raise AssertionError(f"{prefix} [{r0}:{r1}] {name}: supertile decode mismatch max_diff={mx}")
 
-        self.add_bytes(f"{prefix}.vtq3.data", b"".join(blobs), "u8", [off])
-        self.add_bytes(f"{prefix}.vtq3.slices", np.array(meta, dtype=np.int32), "i32", [len(meta), 5])
-        self.add_tensor(f"{prefix}.vtq3.d_row", d_row_t.to(torch.float16))
-        self.add_tensor(f"{prefix}.vtq3.suh", m["suh"].to(torch.float16))
+        self.add_bytes(f"{prefix}.vtq.data", b"".join(blobs), "u8", [off])
+        self.add_bytes(f"{prefix}.vtq.slices", np.array(meta, dtype=np.int32), "i32", [len(meta), 5])
+        self.add_tensor(f"{prefix}.vtq.d_row", d_row_t.to(torch.float16))
+        self.add_tensor(f"{prefix}.vtq.suh", m["suh"].to(torch.float16))
 
     def finalize(self, meta: dict):
         hdr = json.dumps({**meta, "tensors": self.tensors}, separators=(",", ":")).encode("utf-8")
@@ -654,16 +654,16 @@ class Vtq3Writer:
         self.f.close()
 
 
-class Vtq3File:
+class VtqFile:
     def __init__(self, path: Path):
         import mmap
 
         self.f = open(path, "rb")
         self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
         magic, ver, hlen = struct.unpack_from("<4sIQ", self.mm, 0)
-        assert magic == MAGIC and ver == VERSION, f"not a .vtq v3 file: {magic!r} v{ver}"
+        assert magic == MAGIC and ver in (VERSION, 3), f"not a .vtq file: {magic!r} v{ver}"
         self.header = json.loads(bytes(self.mm[16 : 16 + hlen]))
-        self.formats = [format_from_json_vtq3(d) for d in self.header["quantization"]["formats"]]
+        self.formats = [format_from_json_vtq(d) for d in self.header["quantization"]["formats"]]
         end = 16 + hlen
         while end < len(self.mm) and self.mm[end] == 0x20:
             end += 1
@@ -682,12 +682,12 @@ class Vtq3File:
         return arr.view(torch.bfloat16) if t["dtype"] == "bf16" else arr
 
     def decode_matrix(self, prefix: str, device="cuda") -> torch.Tensor:
-        suh = self.tensor(f"{prefix}.vtq3.suh").to(device)
-        d_row = self.tensor(f"{prefix}.vtq3.d_row").cpu().numpy()
-        slices = self.tensor(f"{prefix}.vtq3.slices").tolist()
+        suh = self.tensor(f"{prefix}.vtq.suh").to(device)
+        d_row = self.tensor(f"{prefix}.vtq.d_row").cpu().numpy()
+        slices = self.tensor(f"{prefix}.vtq.slices").tolist()
         M = max(s[1] for s in slices)
         K = suh.shape[0]
-        data = self.raw(f"{prefix}.vtq3.data")
+        data = self.raw(f"{prefix}.vtq.data")
         W_rot = torch.empty((M, K), dtype=torch.float32, device=device)
         rot_block = slices[0][4] if len(slices[0]) >= 5 else -1
         for row_s in slices:
@@ -695,18 +695,18 @@ class Vtq3File:
             fmt = self.formats[fi]
             nbg = _align(r1 - r0, SUPER_ROWS) // SUPER_ROWS
             nbytes = nbg * (K // TILE) * fmt.st_bytes
-            dec_np = decode_supertiles_vtq3(data[off : off + nbytes], r1 - r0, K, fmt, d_row=d_row[r0:r1])
+            dec_np = decode_supertiles_vtq(data[off : off + nbytes], r1 - r0, K, fmt, d_row=d_row[r0:r1])
             W_rot[r0:r1] = torch.from_numpy(dec_np).to(device)
-        return apply_vtq3_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
+        return apply_vtq_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
 
 
 # ------------------------------------------------------------------------------------------------
-# Comprehensive Self-Test (CPU C `vtq3_avx2_bench.c` Cross-Check + CUDA Viterbi + `.vtq` v3 Container)
+# Comprehensive Self-Test (CPU C `vtq_avx2_bench.c` Cross-Check + CUDA Viterbi + `.vtq` Container)
 # ------------------------------------------------------------------------------------------------
 
 def self_test(cpu_only: bool = False) -> dict:
     rng = np.random.default_rng(2026)
-    synth_fmts: list[Vtq3Format] = []
+    synth_fmts: list[VtqFormat] = []
     for fc, (K, gosset, nl, h, _) in FMT_META.items():
         if fc in (15, 17):
             pos = np.sort(rng.integers(0, 127, size=16, dtype=np.int8))
@@ -726,7 +726,7 @@ def self_test(cpu_only: bool = False) -> dict:
             hw = {"type": "u8", "qmax": 127, "tab_div": 64, "tab_u8": tab_u8.tolist()}
         gain_u8 = np.linspace(44, 96, 1 << h).round().astype(np.uint8)
         synth_fmts.append(
-            Vtq3Format(
+            VtqFormat(
                 name=f"TEST_{fc}",
                 fmt_code=fc,
                 K=K,
@@ -736,7 +736,7 @@ def self_test(cpu_only: bool = False) -> dict:
                 sub=16,
                 hw_codebook=hw,
                 gain_u8=gain_u8,
-                lut=reconstruct_lut_from_hw_vtq3(fc, hw),
+                lut=reconstruct_lut_from_hw_vtq(fc, hw),
                 gain_tab=gain_u8.astype(np.float32) * GAIN_UNIT,
                 scale=1.0,
             )
@@ -748,19 +748,19 @@ def self_test(cpu_only: bool = False) -> dict:
     a_i8 = rng.integers(-127, 128, size=K, dtype=np.int8)
     d_row = rng.uniform(0.005, 0.03, size=M).astype(np.float16)
 
-    # Compile a tiny shared helper from `src/cpu/vtq3_avx2_bench.c` (`scalar_ref_vtq3`) to verify C byte-compatibility!
-    c_src_path = Path(__file__).resolve().parent / "cpu" / "vtq3_avx2_bench.c"
+    # Compile a tiny shared helper from `src/cpu/vtq_avx2_bench.c` (`scalar_ref_vtq`) to verify C byte-compatibility!
+    c_src_path = Path(__file__).resolve().parent / "cpu" / "vtq_avx2_bench.c"
     c_lib = None
     tmp_so = None
     if c_src_path.exists():
         tmp_so = Path(tempfile.mktemp(suffix=".so"))
         wrap_c = Path(tempfile.mktemp(suffix=".c"))
         wrap_c.write_text(
-            f'#define M_ROWS {M}\n#define K_COLS {K}\n#define main vtq3_bench_unused_main\n'
+            f'#define M_ROWS {M}\n#define K_COLS {K}\n#define main vtq_bench_unused_main\n'
             f'#include "{c_src_path}"\n#undef main\n'
             f'void c_scalar_check(const void* st, size_t stride, const uint8_t* tab, const uint8_t* g8, '
             f'const int8_t* a, const float* dr, float* y, int fmt) {{\n'
-            f'    scalar_ref_vtq3(st, stride, tab, g8, a, dr, y, fmt);\n}}\n',
+            f'    scalar_ref_vtq(st, stride, tab, g8, a, dr, y, fmt);\n}}\n',
             encoding="utf-8",
         )
         subprocess.run(["gcc", "-O2", "-mavx2", "-mfma", "-shared", "-fPIC", str(wrap_c), "-lm", "-o", str(tmp_so)], check=True)
@@ -799,13 +799,13 @@ def self_test(cpu_only: bool = False) -> dict:
             g_sub = rng.integers(0, 1 << fmt.h, size=(M, nsb, 16), dtype=np.uint8)
             u_sb = rng.integers(32, 240, size=(M, nsb), dtype=np.uint8)
 
-            packed = pack_supertiles_vtq3(c_all, u_nat, g_sub, u_sb, fmt)
-            W_dec = decode_supertiles_vtq3(packed, M, K, fmt, d_row=d_row)
+            packed = pack_supertiles_vtq(c_all, u_nat, g_sub, u_sb, fmt)
+            W_dec = decode_supertiles_vtq(packed, M, K, fmt, d_row=d_row)
             y_py = W_dec @ a_i8.astype(np.float32)
 
             c_rel_err = 0.0
             if c_lib is not None and fmt.fmt_code in (15, 20, 25, 30, 31, 35, 40, 50, 51, 60):
-                tab_raw = np.ascontiguousarray(hw_to_canon_u8_vtq3(fmt.fmt_code, fmt.hw_codebook), dtype=np.uint8)
+                tab_raw = np.ascontiguousarray(hw_to_canon_u8_vtq(fmt.fmt_code, fmt.hw_codebook), dtype=np.uint8)
                 g8_pad = np.zeros(8, dtype=np.uint8)
                 g8_pad[: len(fmt.gain_u8)] = fmt.gain_u8
                 dr_eff = (d_row.astype(np.float32) * float(TAB_UNIT * GAIN_UNIT * U_SB_UNIT)).astype(np.float32)
@@ -833,7 +833,7 @@ def self_test(cpu_only: bool = False) -> dict:
             tmp_so.unlink(missing_ok=True)
 
     if not cpu_only and torch.cuda.is_available():
-        from src.vtq_v3 import viterbi_vtq3_cuda
+        from src.vtq import viterbi_vtq_cuda
 
         dev = torch.device("cuda")
         for fmt in synth_fmts:
@@ -842,18 +842,18 @@ def self_test(cpu_only: bool = False) -> dict:
             w = torch.rand(N_seq, 256, device=dev) + 0.5
             tab_t = torch.tensor(fmt.lut, dtype=torch.float32, device=dev)
             gains_t = torch.tensor(fmt.gain_tab, dtype=torch.float32, device=dev)
-            rec, g_out, c_out, u_out, _ = viterbi_vtq3_cuda(x, w, tab_t, gains_t, fmt.nl, fmt.U, frac=fmt.gosset)
+            rec, g_out, c_out, u_out, _ = viterbi_vtq_cuda(x, w, tab_t, gains_t, fmt.nl, fmt.U, frac=fmt.gosset)
 
             d_one = np.ones(N_seq, dtype=np.float16)
             usb_128 = np.full((N_seq, 1), 128, dtype=np.uint8)  # 128 * (1/128) == 1.0 exactly!
-            st_bytes = pack_supertiles_vtq3(
+            st_bytes = pack_supertiles_vtq(
                 c_out.cpu().numpy().reshape(N_seq, 1, 16, 2),
                 u_out.cpu().numpy().reshape(N_seq, 1, 256),
                 g_out.cpu().numpy().reshape(N_seq, 1, 16),
                 usb_128,
                 fmt,
             )
-            dec_nat = decode_supertiles_vtq3(st_bytes, N_seq, 256, fmt, d_row=d_one)
+            dec_nat = decode_supertiles_vtq(st_bytes, N_seq, 256, fmt, d_row=d_one)
             max_diff = float(np.max(np.abs(dec_nat - rec.cpu().numpy())))
             assert max_diff == 0.0, f"Bit-exact mismatch in {fmt.name}: max_diff={max_diff}"
             report["formats"][fmt.name]["gpu_viterbi_max_diff"] = max_diff
@@ -861,7 +861,7 @@ def self_test(cpu_only: bool = False) -> dict:
 
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "selftest_v3.vtq"
-            wr = Vtq3Writer(p, synth_fmts)
+            wr = VtqWriter(p, synth_fmts)
             M_c, K_c = 32, 512
             suh = torch.ones(K_c, dtype=torch.float16, device=dev) * 0.75
             c_m = rng.integers(0, 256, size=(M_c, 2, 16, 2), dtype=np.uint8)
@@ -874,8 +874,8 @@ def self_test(cpu_only: bool = False) -> dict:
             W_rot_ref = np.zeros((M_c, K_c), dtype=np.float32)
             for r0, r1, snm in slices:
                 f_obj = next(f for f in synth_fmts if f.name == snm)
-                W_rot_ref[r0:r1] = decode_supertiles_vtq3(
-                    pack_supertiles_vtq3(c_m[r0:r1], u0[r0:r1], g_m[r0:r1], usb_m[r0:r1], f_obj),
+                W_rot_ref[r0:r1] = decode_supertiles_vtq(
+                    pack_supertiles_vtq(c_m[r0:r1], u0[r0:r1], g_m[r0:r1], usb_m[r0:r1], f_obj),
                     r1 - r0, K_c, f_obj, d_row=dr_m[r0:r1],
                 )
             wr.add_matrix(
@@ -893,14 +893,14 @@ def self_test(cpu_only: bool = False) -> dict:
                 },
                 verify=True,
             )
-            wr.finalize({"format": "vtq-v3", "quantization": {"formats": [format_json_vtq3(f) for f in synth_fmts]}})
-            vf = Vtq3File(p)
+            wr.finalize({"format": "vtq", "quantization": {"formats": [format_json_vtq(f) for f in synth_fmts]}})
+            vf = VtqFile(p)
             W_reloaded = vf.decode_matrix("model.layers.0.self_attn.q_proj", device=dev)
-            W_expected = apply_vtq3_rot(torch.from_numpy(W_rot_ref).to(dev), rot_block=-1, transpose=True) * suh.float().unsqueeze(0)
+            W_expected = apply_vtq_rot(torch.from_numpy(W_rot_ref).to(dev), rot_block=-1, transpose=True) * suh.float().unsqueeze(0)
             c_diff = float((W_reloaded - W_expected).abs().max().item())
             assert c_diff < 1e-6, f"Container roundtrip diff={c_diff}"
             report["container_roundtrip_max_diff"] = c_diff
-            print(f"  [Container] `.vtq` v3 roundtrip max_diff={c_diff:.2e} OK", flush=True)
+            print(f"  [Container] `.vtq` roundtrip max_diff={c_diff:.2e} OK", flush=True)
 
     return report
 

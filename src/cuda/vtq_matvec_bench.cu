@@ -1,8 +1,8 @@
-// VTQ v3 `16x256` Super-Tile Bank-Conflict-Free GPU Blackwell Benchmark
-// (`nvcc -O3 -std=c++17 -arch=sm_120 src/cuda/vtq3_matvec_bench.cu -o vtq3_matvec_bench`)
+// VTQ `16x256` Super-Tile Bank-Conflict-Free GPU Blackwell Benchmark
+// (`nvcc -O3 -std=c++17 -arch=sm_120 src/cuda/vtq_matvec_bench.cu -o vtq_matvec_bench`)
 //
-// Core VTQ v3 GPU Blackwell (`sm_120`) hardware innovations over VTQ v1 (`LTQ`) and VTQ v2:
-//   1. `16 rows x 256 cols = 4,096 weights` Super-Tile Shared Byte-for-Byte with CPU AVX2 (`vtq3_st16_k*_t`):
+// Core VTQ GPU Blackwell (`sm_120`) hardware innovations over VTQ v1 (`LTQ`) and VTQ v2:
+//   1. `16 rows x 256 cols = 4,096 weights` Super-Tile Shared Byte-for-Byte with CPU AVX2 (`vtq_st16_k*_t`):
 //      - Reuses each activation `x[j]` `8x..16x` in registers across all 16 rows of the super-tile (`16x` lower `x` traffic),
 //      - Stores `u_sb[16]` (`uint8` linear superblock row scale) + per-row `fp16 d_row[M]` + per-format `float32 unit` (`0` inner-loop `fp16->fp32`).
 //   2. Bank-Conflict-Free Replicated Shared-Memory Codebooks (`s_lut[N_ENT][32]`, `4..16 KB`):
@@ -47,35 +47,35 @@ __global__ void fill_bytes(uint8_t* p, size_t n, uint32_t seed) {
     for (size_t i = idx4; i < n4; i += stride) p4[i] = hash32(i, seed);
 }
 
-// Identical `16x256` (`4,096`-weight) super-tile structs to `src/cpu/vtq3_avx2_bench.c`:
-struct vtq3_st16_k15_t { uint8_t c[16][16][2]; uint8_t ham[16][16]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
-struct vtq3_st16_k20_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
-struct vtq3_st16_k25_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ham[16][16]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
-struct vtq3_st16_k30_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ub0[16][32]; uint16_t hdr[16][2]; uint8_t u_sb[16]; };
-struct vtq3_st16_k35_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ub1[16][32]; uint8_t ham[16][16]; uint16_t hdr[16][2]; uint8_t u_sb[16]; };
-struct vtq3_st16_k40_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u2[16][2][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
-struct vtq3_st16_k50_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u2[16][2][32]; uint8_t ub2[16][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
-struct vtq3_st16_k60_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u4[16][4][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
+// Identical `16x256` (`4,096`-weight) super-tile structs to `src/cpu/vtq_avx2_bench.c`:
+struct vtq_st16_k15_t { uint8_t c[16][16][2]; uint8_t ham[16][16]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
+struct vtq_st16_k20_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
+struct vtq_st16_k25_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ham[16][16]; uint16_t hdr[16][1]; uint8_t u_sb[16]; };
+struct vtq_st16_k30_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ub0[16][32]; uint16_t hdr[16][2]; uint8_t u_sb[16]; };
+struct vtq_st16_k35_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t ub1[16][32]; uint8_t ham[16][16]; uint16_t hdr[16][2]; uint8_t u_sb[16]; };
+struct vtq_st16_k40_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u2[16][2][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
+struct vtq_st16_k50_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u2[16][2][32]; uint8_t ub2[16][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
+struct vtq_st16_k60_t { uint8_t c[16][16][2]; uint8_t usgn[16][32]; uint8_t u4[16][4][32]; uint16_t hdr[16][3]; uint8_t u_sb[16]; };
 
-static_assert(sizeof(vtq3_st16_k15_t) ==  816, "st16_k15");
-static_assert(sizeof(vtq3_st16_k20_t) == 1072, "st16_k20");
-static_assert(sizeof(vtq3_st16_k25_t) == 1328, "st16_k25");
-static_assert(sizeof(vtq3_st16_k30_t) == 1616, "st16_k30");
-static_assert(sizeof(vtq3_st16_k35_t) == 1872, "st16_k35");
-static_assert(sizeof(vtq3_st16_k40_t) == 2160, "st16_k40");
-static_assert(sizeof(vtq3_st16_k50_t) == 2672, "st16_k50");
-static_assert(sizeof(vtq3_st16_k60_t) == 3184, "st16_k60");
+static_assert(sizeof(vtq_st16_k15_t) ==  816, "st16_k15");
+static_assert(sizeof(vtq_st16_k20_t) == 1072, "st16_k20");
+static_assert(sizeof(vtq_st16_k25_t) == 1328, "st16_k25");
+static_assert(sizeof(vtq_st16_k30_t) == 1616, "st16_k30");
+static_assert(sizeof(vtq_st16_k35_t) == 1872, "st16_k35");
+static_assert(sizeof(vtq_st16_k40_t) == 2160, "st16_k40");
+static_assert(sizeof(vtq_st16_k50_t) == 2672, "st16_k50");
+static_assert(sizeof(vtq_st16_k60_t) == 3184, "st16_k60");
 
 template <int FMT>
 __host__ __device__ __forceinline__ constexpr size_t st_bytes() {
-    if constexpr (FMT == 15) return sizeof(vtq3_st16_k15_t);
-    if constexpr (FMT == 20) return sizeof(vtq3_st16_k20_t);
-    if constexpr (FMT == 25) return sizeof(vtq3_st16_k25_t);
-    if constexpr (FMT == 30 || FMT == 31) return sizeof(vtq3_st16_k30_t);
-    if constexpr (FMT == 35) return sizeof(vtq3_st16_k35_t);
-    if constexpr (FMT == 40) return sizeof(vtq3_st16_k40_t);
-    if constexpr (FMT == 50 || FMT == 51) return sizeof(vtq3_st16_k50_t);
-    return sizeof(vtq3_st16_k60_t);
+    if constexpr (FMT == 15) return sizeof(vtq_st16_k15_t);
+    if constexpr (FMT == 20) return sizeof(vtq_st16_k20_t);
+    if constexpr (FMT == 25) return sizeof(vtq_st16_k25_t);
+    if constexpr (FMT == 30 || FMT == 31) return sizeof(vtq_st16_k30_t);
+    if constexpr (FMT == 35) return sizeof(vtq_st16_k35_t);
+    if constexpr (FMT == 40) return sizeof(vtq_st16_k40_t);
+    if constexpr (FMT == 50 || FMT == 51) return sizeof(vtq_st16_k50_t);
+    return sizeof(vtq_st16_k60_t);
 }
 
 template <int FMT>
@@ -157,7 +157,7 @@ __device__ __forceinline__ void load_plane512_eo(
 //      0 runtime Galois shifts/XORs, 0 `s_pk` staging, `x` loaded ONCE across all 16 rows!
 // =================================================================================================
 template <int FMT, int SPLIT_K>
-__global__ void __launch_bounds__(256) vtq3_fp32_gemv(
+__global__ void __launch_bounds__(256) vtq_fp32_gemv(
     const uint8_t* __restrict__ ST_raw,
     const __half* __restrict__ d_row,
     float unit,
@@ -428,7 +428,7 @@ __device__ __forceinline__ void stage_supertile_meta(
 // 2a. Zero-Galois-ALU Joint-1024 `16x256` INT8 `__dp4a` Single-Token GEMV (`B = 1`, `lane = 2*g + hc`)
 // =================================================================================================
 template <int FMT, int SPLIT_K>
-__global__ void __launch_bounds__(256) vtq3_dp4a_gemv_b1(
+__global__ void __launch_bounds__(256) vtq_dp4a_gemv_b1(
     const uint8_t* __restrict__ ST_raw,
     const __half* __restrict__ d_row,
     float unit,
@@ -632,7 +632,7 @@ __global__ void __launch_bounds__(256) vtq3_dp4a_gemv_b1(
 //     Zero register spills (`<= 96` regs), `0.5..8 KB` `s_joint`!
 // =================================================================================================
 template <int FMT, int B_TILE, int SPLIT_K>
-__global__ void vtq3_dp4a_gemm(
+__global__ void vtq_dp4a_gemm(
     const uint8_t* __restrict__ ST_raw,
     const __half* __restrict__ d_row,
     float unit,
@@ -920,7 +920,7 @@ __global__ void fused_fwht256_quant_q8(
 // =================================================================================================
 // Host Table Builder & Exact Reference Checkers
 // =================================================================================================
-struct Vtq3TabHost {
+struct VtqTabHost {
     float   signed_f32[512];
     int32_t signed_i32[512];
     float   gain_f[8];
@@ -928,8 +928,8 @@ struct Vtq3TabHost {
 };
 
 template <int FMT>
-static Vtq3TabHost build_signed_tab(const uint8_t* tab_canon, const uint8_t* gain_u8) {
-    Vtq3TabHost th{};
+static VtqTabHost build_signed_tab(const uint8_t* tab_canon, const uint8_t* gain_u8) {
+    VtqTabHost th{};
     constexpr int NL    = fmt_nl<FMT>();
     constexpr int LBITS = (NL == 4) ? 2 : ((NL == 8) ? 3 : 4);
     constexpr int UB    = fmt_ub<FMT>();
@@ -1226,20 +1226,20 @@ static void bench_fp32(size_t target_bytes, const char* tag, const char* label,
     CK(cudaMalloc(&d_ST, total_bytes));
     fill_bytes<<<1024, 256>>>(d_ST, total_bytes, 100 + FMT);
 
-    Vtq3TabHost th = build_signed_tab<FMT>(tab_canon, gain_u8);
+    VtqTabHost th = build_signed_tab<FMT>(tab_canon, gain_u8);
     CK(cudaMemcpy(g_lut_f,  th.signed_f32, sizeof(th.signed_f32), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(g_gain_f, th.gain_f,     sizeof(th.gain_f),     cudaMemcpyHostToDevice));
 
     int nb1 = 0, nb8 = 0;
-    CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq3_fp32_gemv<FMT, 1>, 256, 0));
-    CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb8, vtq3_fp32_gemv<FMT, 8>, 256, 0));
+    CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq_fp32_gemv<FMT, 1>, 256, 0));
+    CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb8, vtq_fp32_gemv<FMT, 8>, 256, 0));
     const int iters = target_bytes > (256u << 20) ? 20 : 200;
 
     int grid1 = std::max(1, std::min(nb1 * g_sms, (nbg + 7) / 8));
     int grid8 = std::max(1, std::min(nb8 * g_sms, nbg));
-    float ms1 = time_ms([&] { vtq3_fp32_gemv<FMT, 1><<<grid1, 256>>>(d_ST, g_drow, unit, g_x, g_y, M, KD, g_lut_f, g_gain_f); }, iters);
+    float ms1 = time_ms([&] { vtq_fp32_gemv<FMT, 1><<<grid1, 256>>>(d_ST, g_drow, unit, g_x, g_y, M, KD, g_lut_f, g_gain_f); }, iters);
     double rel1 = host_verify_fp32<FMT>(d_ST, g_drow, unit, g_x, g_y, tab_canon, gain_u8, KD, 32);
-    float ms8 = time_ms([&] { vtq3_fp32_gemv<FMT, 8><<<grid8, 256>>>(d_ST, g_drow, unit, g_x, g_y, M, KD, g_lut_f, g_gain_f); }, iters);
+    float ms8 = time_ms([&] { vtq_fp32_gemv<FMT, 8><<<grid8, 256>>>(d_ST, g_drow, unit, g_x, g_y, M, KD, g_lut_f, g_gain_f); }, iters);
     double rel8 = host_verify_fp32<FMT>(d_ST, g_drow, unit, g_x, g_y, tab_canon, gain_u8, KD, 32);
 
     const bool use_sk8 = (ms8 <= ms1);
@@ -1269,7 +1269,7 @@ static void bench_dp4a(size_t target_bytes, const char* tag, const char* label,
     CK(cudaMalloc(&d_ST, total_bytes));
     fill_bytes<<<1024, 256>>>(d_ST, total_bytes, 300 + FMT);
 
-    Vtq3TabHost th = build_signed_tab<FMT>(tab_canon, gain_u8);
+    VtqTabHost th = build_signed_tab<FMT>(tab_canon, gain_u8);
     CK(cudaMemcpy(g_lut_i,  th.signed_i32, sizeof(th.signed_i32), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(g_gain_i, th.gain_i,     sizeof(th.gain_i),     cudaMemcpyHostToDevice));
 
@@ -1280,13 +1280,13 @@ static void bench_dp4a(size_t target_bytes, const char* tag, const char* label,
 
     if constexpr (B_TOK == 1) {
         int nb1 = 0, nb8 = 0;
-        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq3_dp4a_gemv_b1<FMT, 1>, 256, 0));
-        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb8, vtq3_dp4a_gemv_b1<FMT, 8>, 256, 0));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq_dp4a_gemv_b1<FMT, 1>, 256, 0));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb8, vtq_dp4a_gemv_b1<FMT, 8>, 256, 0));
         int grid1 = std::max(1, std::min(nb1 * g_sms, (nbg + 7) / 8));
         int grid8 = std::max(1, std::min(nb8 * g_sms, nbg));
-        float ms1 = time_ms([&] { vtq3_dp4a_gemv_b1<FMT, 1><<<grid1, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
+        float ms1 = time_ms([&] { vtq_dp4a_gemv_b1<FMT, 1><<<grid1, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
         double rel1 = host_verify_dp4a<FMT, 1>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, tab_canon, gain_u8, M, KD, 32);
-        float ms8 = time_ms([&] { vtq3_dp4a_gemv_b1<FMT, 8><<<grid8, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
+        float ms8 = time_ms([&] { vtq_dp4a_gemv_b1<FMT, 8><<<grid8, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
         double rel8 = host_verify_dp4a<FMT, 1>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, tab_canon, gain_u8, M, KD, 32);
         ms = (ms8 < ms1) ? ms8 : ms1;
         sk_used = (ms8 < ms1) ? 8 : 1;
@@ -1294,10 +1294,10 @@ static void bench_dp4a(size_t target_bytes, const char* tag, const char* label,
     } else {
         constexpr int B_TILE = (B_TOK >= 16) ? 16 : B_TOK;
         int nb1 = 0;
-        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq3_dp4a_gemm<FMT, B_TILE, 1>, 256, 0));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb1, vtq_dp4a_gemm<FMT, B_TILE, 1>, 256, 0));
         int grid1 = std::max(1, std::min(nb1 * g_sms, (nbg + 7) / 8));
         dim3 grid_2d(grid1, B_TOK / B_TILE);
-        ms = time_ms([&] { vtq3_dp4a_gemm<FMT, B_TILE, 1><<<grid_2d, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
+        ms = time_ms([&] { vtq_dp4a_gemm<FMT, B_TILE, 1><<<grid_2d, 256>>>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, M, KD, g_lut_i, g_gain_i); }, iters);
         rel = host_verify_dp4a<FMT, B_TOK>(d_ST, g_drow, unit, g_xq8, g_dx, g_y, tab_canon, gain_u8, M, KD, 32);
     }
     (void)sk_used;
@@ -1342,47 +1342,47 @@ int main() {
     for (int i = 0; i < 256; i++) tab_u8[i] = (uint8_t)(1 + (hash32(i, 22) % 127));
     const uint8_t gain_u8[8] = {42, 49, 56, 63, 71, 79, 89, 101};
 
-    printf("=== VTQ v3 16x256 Super-Tile Bank-Conflict-Free GPU Benchmark (%s, %d SM) ===\n", p.name, g_sms);
+    printf("=== VTQ 16x256 Super-Tile Bank-Conflict-Free GPU Benchmark (%s, %d SM) ===\n", p.name, g_sms);
 
     for (int pass = 0; pass < 2; pass++) {
         size_t tb = (pass == 0) ? (2048ull << 20) : (size_t)(p.l2CacheSize * 0.4);
         const char* tag = (pass == 0) ? "DRAM" : "L2";
         printf("\n-- FP32 GEMV %s (%.0f MB, batch=1, 16x256 Super-Tile + 0 bank conflicts!) --\n", tag, tb / 1048576.0);
-        bench_fp32<15>(tb, tag, "VTQ3 K=1.5 Gosset84",    tab_s8, gain_u8);
-        bench_fp32<20>(tb, tag, "VTQ3 K=2.0 nl=16",       tab_u8, gain_u8);
-        bench_fp32<25>(tb, tag, "VTQ3 K=2.5 Gosset84",    tab_u8, gain_u8);
-        bench_fp32<30>(tb, tag, "VTQ3 K=3.0 nl=8",        tab_u8, gain_u8);
-        bench_fp32<31>(tb, tag, "VTQ3 K=3.0 nl=16",       tab_u8, gain_u8);
-        bench_fp32<35>(tb, tag, "VTQ3 K=3.5 Gosset84",    tab_u8, gain_u8);
-        bench_fp32<40>(tb, tag, "VTQ3 K=4.0 nl=16",       tab_u8, gain_u8);
-        bench_fp32<50>(tb, tag, "VTQ3 K=5.0 nl=4",        tab_u8, gain_u8);
-        bench_fp32<51>(tb, tag, "VTQ3 K=5.0 nl=16",       tab_u8, gain_u8);
-        bench_fp32<60>(tb, tag, "VTQ3 K=6.0 nl=16",       tab_u8, gain_u8);
+        bench_fp32<15>(tb, tag, "VTQ K=1.5 Gosset84",    tab_s8, gain_u8);
+        bench_fp32<20>(tb, tag, "VTQ K=2.0 nl=16",       tab_u8, gain_u8);
+        bench_fp32<25>(tb, tag, "VTQ K=2.5 Gosset84",    tab_u8, gain_u8);
+        bench_fp32<30>(tb, tag, "VTQ K=3.0 nl=8",        tab_u8, gain_u8);
+        bench_fp32<31>(tb, tag, "VTQ K=3.0 nl=16",       tab_u8, gain_u8);
+        bench_fp32<35>(tb, tag, "VTQ K=3.5 Gosset84",    tab_u8, gain_u8);
+        bench_fp32<40>(tb, tag, "VTQ K=4.0 nl=16",       tab_u8, gain_u8);
+        bench_fp32<50>(tb, tag, "VTQ K=5.0 nl=4",        tab_u8, gain_u8);
+        bench_fp32<51>(tb, tag, "VTQ K=5.0 nl=16",       tab_u8, gain_u8);
+        bench_fp32<60>(tb, tag, "VTQ K=6.0 nl=16",       tab_u8, gain_u8);
     }
 
     for (int pass = 0; pass < 2; pass++) {
         size_t tb = (pass == 0) ? (2048ull << 20) : (size_t)(p.l2CacheSize * 0.4);
         const char* tag = (pass == 0) ? "DRAM" : "L2";
         printf("\n-- DP4A INT8 GEMV / Multi-Token GEMM %s (%.0f MB, 16x256 Super-Tile + 0 bank conflicts!) --\n", tag, tb / 1048576.0);
-        bench_dp4a<15, 1>(tb, tag, "VTQ3-DP4A K=1.5 Gosset84", tab_s8, gain_u8);
-        bench_dp4a<20, 1>(tb, tag, "VTQ3-DP4A K=2.0 nl=16",    tab_u8, gain_u8);
-        bench_dp4a<25, 1>(tb, tag, "VTQ3-DP4A K=2.5 Gosset84", tab_u8, gain_u8);
-        bench_dp4a<30, 1>(tb, tag, "VTQ3-DP4A K=3.0 nl=8",     tab_u8, gain_u8);
-        bench_dp4a<31, 1>(tb, tag, "VTQ3-DP4A K=3.0 nl=16",    tab_u8, gain_u8);
-        bench_dp4a<35, 1>(tb, tag, "VTQ3-DP4A K=3.5 Gosset84", tab_u8, gain_u8);
-        bench_dp4a<40, 1>(tb, tag, "VTQ3-DP4A K=4.0 nl=16",    tab_u8, gain_u8);
-        bench_dp4a<50, 1>(tb, tag, "VTQ3-DP4A K=5.0 nl=4",     tab_u8, gain_u8);
-        bench_dp4a<51, 1>(tb, tag, "VTQ3-DP4A K=5.0 nl=16",    tab_u8, gain_u8);
-        bench_dp4a<60, 1>(tb, tag, "VTQ3-DP4A K=6.0 nl=16",    tab_u8, gain_u8);
+        bench_dp4a<15, 1>(tb, tag, "VTQ-DP4A K=1.5 Gosset84", tab_s8, gain_u8);
+        bench_dp4a<20, 1>(tb, tag, "VTQ-DP4A K=2.0 nl=16",    tab_u8, gain_u8);
+        bench_dp4a<25, 1>(tb, tag, "VTQ-DP4A K=2.5 Gosset84", tab_u8, gain_u8);
+        bench_dp4a<30, 1>(tb, tag, "VTQ-DP4A K=3.0 nl=8",     tab_u8, gain_u8);
+        bench_dp4a<31, 1>(tb, tag, "VTQ-DP4A K=3.0 nl=16",    tab_u8, gain_u8);
+        bench_dp4a<35, 1>(tb, tag, "VTQ-DP4A K=3.5 Gosset84", tab_u8, gain_u8);
+        bench_dp4a<40, 1>(tb, tag, "VTQ-DP4A K=4.0 nl=16",    tab_u8, gain_u8);
+        bench_dp4a<50, 1>(tb, tag, "VTQ-DP4A K=5.0 nl=4",     tab_u8, gain_u8);
+        bench_dp4a<51, 1>(tb, tag, "VTQ-DP4A K=5.0 nl=16",    tab_u8, gain_u8);
+        bench_dp4a<60, 1>(tb, tag, "VTQ-DP4A K=6.0 nl=16",    tab_u8, gain_u8);
         if (pass == 0) {
-            bench_dp4a<20, 8>(tb,  tag, "VTQ3-DP4A K=2.0 nl=16", tab_u8, gain_u8);
-            bench_dp4a<20, 32>(tb, tag, "VTQ3-DP4A K=2.0 nl=16", tab_u8, gain_u8);
-            bench_dp4a<30, 8>(tb,  tag, "VTQ3-DP4A K=3.0 nl=8",  tab_u8, gain_u8);
-            bench_dp4a<30, 32>(tb, tag, "VTQ3-DP4A K=3.0 nl=8",  tab_u8, gain_u8);
-            bench_dp4a<31, 8>(tb,  tag, "VTQ3-DP4A K=3.0 nl=16", tab_u8, gain_u8);
-            bench_dp4a<31, 32>(tb, tag, "VTQ3-DP4A K=3.0 nl=16", tab_u8, gain_u8);
-            bench_dp4a<40, 8>(tb,  tag, "VTQ3-DP4A K=4.0 nl=16", tab_u8, gain_u8);
-            bench_dp4a<40, 32>(tb, tag, "VTQ3-DP4A K=4.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<20, 8>(tb,  tag, "VTQ-DP4A K=2.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<20, 32>(tb, tag, "VTQ-DP4A K=2.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<30, 8>(tb,  tag, "VTQ-DP4A K=3.0 nl=8",  tab_u8, gain_u8);
+            bench_dp4a<30, 32>(tb, tag, "VTQ-DP4A K=3.0 nl=8",  tab_u8, gain_u8);
+            bench_dp4a<31, 8>(tb,  tag, "VTQ-DP4A K=3.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<31, 32>(tb, tag, "VTQ-DP4A K=3.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<40, 8>(tb,  tag, "VTQ-DP4A K=4.0 nl=16", tab_u8, gain_u8);
+            bench_dp4a<40, 32>(tb, tag, "VTQ-DP4A K=4.0 nl=16", tab_u8, gain_u8);
         }
     }
 
