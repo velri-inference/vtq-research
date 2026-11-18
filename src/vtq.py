@@ -1,23 +1,23 @@
 """
-VTQ v3 Production Quantizer, Hardware-Exact Table Trainer & Multi-Architecture Pipeline (`src/vtq_v3.py`):
-  1. C++/CUDA wrappers (`viterbi_vtq3_cuda`, `ldlq_vtq3_block256_cuda`) over `src/cuda/tcq_viterbi.cu`:
+VTQ Production Quantizer, Hardware-Exact Table Trainer & Multi-Architecture Pipeline (`src/vtq.py`):
+  1. C++/CUDA wrappers (`viterbi_vtq_cuda`, `ldlq_vtq_block256_cuda`) over `src/cuda/tcq_viterbi.cu`:
      - `16x16` intra-subblock 256-step 2-pass tail-biting 1024-state (`nu = 10`) radix-4 trellis (one trellis per
        16-column group `g` spanning all 16 rows of a `16x256` super-tile),
      - Exact Bellman joint `(gain, 1024-state)` subblock transition (`sub = 16`, `G = 2^h <= 8`, `n_cand = 4` when `G > 4`),
      - Fused 16-stage `Block16-LDLQ` with causal Cholesky feedback across
        uncoded (`frac = 0`), Gosset `[8, 4, 4]` (`frac = 1`), `D4` `[4, 3, 2]` (`frac = 2`), and `D4_eq` `[4, 1, 4]` (`frac = 3`).
-  2. `train_vtq3_tables`:
+  2. `train_vtq_tables`:
      - Jointly trains all 22 hardware-exact `uint8`/`int8` codebooks (`qmax = 127`, `tab / 64.0f`) and `uint8`
        subblock gains (`gain_u8 / 64.0f`, `sub = 16`) via GPU 1024-state Trellis Lloyd-Max + discrete coordinate search,
      - Calibrates `SPEC_DISTORTION_RATIO` on real `Llama-3.2-3B-Instruct` layers.
-  3. `quantize_matrix_vtq3`:
+  3. `quantize_matrix_vtq`:
      - Canonical Kronecker transform `R_K = H_{2^a} (x) DCT-II_q` (`rot_block = -1`) or Block-256 FWHT (`256`),
      - `suh` preconditioning `(p_w = 0.50, p_h = -0.25)`,
      - Natural-column `Block16-LDLQ` + intra-block `256x256` Cholesky residual Viterbi + full-range `uint8 u_sb` (`<= 248`) +
        two-sided regularized Gauss-Seidel `Block-LDLQ` + global closed-form `(c_row -> fp16 d_row, fp16 suh)` solve,
-     - Bit-exact `assemble_vtq3` reconstruction & `PACK["matrix"]` emission for `Vtq3Writer`.
-  4. `build_vtq3_fisher_slice_profile`, `quantize_llama_model_vtq3`, `polish_model_scales_kld_checkpointed`,
-     `quantize_rings_vtq3`, and `install_vtq3_hooks` (`streaming_quant.py` & `hybrid_quant.py`).
+     - Bit-exact `assemble_vtq` reconstruction & `PACK["matrix"]` emission for `VtqWriter`.
+  4. `build_vtq_fisher_slice_profile`, `quantize_llama_model_vtq`, `polish_model_scales_kld_checkpointed`,
+     `quantize_rings_vtq`, and `install_vtq_hooks` (`streaming_quant.py` & `hybrid_quant.py`).
 """
 
 from __future__ import annotations
@@ -43,59 +43,59 @@ import src.liqk_v2 as lv2
 from src.iqk_format import make_rademacher_signs
 from src.tcq_proto import ldlq_block256_cuda, viterbi_ub_cuda
 from src.vtq_v2 import DualCovAccumulator
-from src.vtq_v3_format import (
+from src.vtq_format import (
     FMT_META,
     GAIN_UNIT,
     SUPER_ROWS,
     TAB_UNIT,
     TILE,
     U_SB_UNIT,
-    Vtq3Format,
-    _at2_indices_vtq3,
-    apply_vtq3_rot,
-    assemble_vtq3,
-    format_json_vtq3,
-    hw_to_canon_u8_vtq3,
-    load_vtq3_formats,
-    reconstruct_lut_from_hw_vtq3,
+    VtqFormat,
+    _at2_indices_vtq,
+    apply_vtq_rot,
+    assemble_vtq,
+    format_json_vtq,
+    hw_to_canon_u8_vtq,
+    load_vtq_formats,
+    reconstruct_lut_from_hw_vtq,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TABLES_PATH = ROOT / "results" / "vtq_v3_tables.json"
+DEFAULT_TABLES_PATH = ROOT / "results" / "vtq_tables.json"
 
 PACK: dict | None = None
 _MEM_MARKS: Optional[List[Tuple[str, float]]] = None  # set to `[]` to record peak VRAM (GiB) per encoder stage
-VTQ3_CONFIG: Dict[str, dict] = {}
-VTQ3_MENU: List[str] = []
+VTQ_CONFIG: Dict[str, dict] = {}
+VTQ_MENU: List[str] = []
 _GPU_TAB_CACHE: Dict[Tuple[str, torch.device], Tuple[torch.Tensor, torch.Tensor]] = {}
 
 # Ordered specification table `(name, fmt_code)` covering `1.594 .. 6.219 bpw` in ~0.25 bpw steps:
-# All 20 active specs in `VTQ3_MENU` (`VTQ3_150 .. VTQ3_600`) use full `nl = 16` (`[359, 40, 475]`) with
-# `s8_32`, `u8`, `at2_16_16` (`K=4`), and `at2z_32_32` (`K=5, 6`), while `VTQ3_300_FAST` (`nl=8`) and
-# `VTQ3_500_FAST` (`nl=4`) provide optional ultra-fast CPU decode modes.
-VTQ3_SPECS_DEF: List[Tuple[str, int]] = [
-    ("VTQ3_150",      15),  # 1.59375 bpw (K=2, Gosset84, nl=16, h=1, s8_32)
-    ("VTQ3_175",      17),  # 1.84375 bpw (K=2, D4,       nl=16, h=1, s8_32)
-    ("VTQ3_200",      20),  # 2.09375 bpw (K=2, plain,    nl=16, h=1, u8 16B)
-    ("VTQ3_225",      22),  # 2.34375 bpw (K=3, D4_eq,    nl=16, h=1, u8 32B)
-    ("VTQ3_250",      25),  # 2.59375 bpw (K=3, Gosset84, nl=16, h=1, u8 32B)
-    ("VTQ3_250_H2",   24),  # 2.65625 bpw (K=3, Gosset84, nl=16, h=2, u8 32B)
-    ("VTQ3_275",      26),  # 2.84375 bpw (K=3, D4,       nl=16, h=1, u8 32B)
-    ("VTQ3_275_H2",   27),  # 2.90625 bpw (K=3, D4,       nl=16, h=2, u8 32B)
-    ("VTQ3_300_FAST", 30),  # 3.15625 bpw (K=3, plain,    nl=8,  h=2, u8 16B)
-    ("VTQ3_300",      31),  # 3.15625 bpw (K=3, plain,    nl=16, h=2, u8 32B)
-    ("VTQ3_325",      32),  # 3.40625 bpw (K=4, D4_eq,    nl=16, h=2, at2_16_16)
-    ("VTQ3_350",      35),  # 3.65625 bpw (K=4, Gosset84, nl=16, h=2, at2_16_16)
-    ("VTQ3_375",      37),  # 3.90625 bpw (K=4, D4,       nl=16, h=2, at2_16_16)
-    ("VTQ3_400",      40),  # 4.21875 bpw (K=4, plain,    nl=16, h=3, at2_16_16)
-    ("VTQ3_425",      42),  # 4.40625 bpw (K=5, D4_eq,    nl=16, h=2, at2z_32_32)
-    ("VTQ3_450",      45),  # 4.65625 bpw (K=5, Gosset84, nl=16, h=2, at2z_32_32)
-    ("VTQ3_475",      47),  # 4.90625 bpw (K=5, D4,       nl=16, h=2, at2z_32_32)
-    ("VTQ3_500_FAST", 50),  # 5.21875 bpw (K=5, plain,    nl=4,  h=3, u8 32B)
-    ("VTQ3_500",      51),  # 5.21875 bpw (K=5, plain,    nl=16, h=3, at2z_32_32)
-    ("VTQ3_550",      55),  # 5.71875 bpw (K=6, Gosset84, nl=16, h=3, at2z_32_32)
-    ("VTQ3_575",      57),  # 5.96875 bpw (K=6, D4,       nl=16, h=3, at2z_32_32)
-    ("VTQ3_600",      60),  # 6.21875 bpw (K=6, plain,    nl=16, h=3, at2z_32_32)
+# All 20 active specs in `VTQ_MENU` (`VTQ_150 .. VTQ_600`) use full `nl = 16` (`[359, 40, 475]`) with
+# `s8_32`, `u8`, `at2_16_16` (`K=4`), and `at2z_32_32` (`K=5, 6`), while `VTQ_300_FAST` (`nl=8`) and
+# `VTQ_500_FAST` (`nl=4`) provide optional ultra-fast CPU decode modes.
+VTQ_SPECS_DEF: List[Tuple[str, int]] = [
+    ("VTQ_150",      15),  # 1.59375 bpw (K=2, Gosset84, nl=16, h=1, s8_32)
+    ("VTQ_175",      17),  # 1.84375 bpw (K=2, D4,       nl=16, h=1, s8_32)
+    ("VTQ_200",      20),  # 2.09375 bpw (K=2, plain,    nl=16, h=1, u8 16B)
+    ("VTQ_225",      22),  # 2.34375 bpw (K=3, D4_eq,    nl=16, h=1, u8 32B)
+    ("VTQ_250",      25),  # 2.59375 bpw (K=3, Gosset84, nl=16, h=1, u8 32B)
+    ("VTQ_250_H2",   24),  # 2.65625 bpw (K=3, Gosset84, nl=16, h=2, u8 32B)
+    ("VTQ_275",      26),  # 2.84375 bpw (K=3, D4,       nl=16, h=1, u8 32B)
+    ("VTQ_275_H2",   27),  # 2.90625 bpw (K=3, D4,       nl=16, h=2, u8 32B)
+    ("VTQ_300_FAST", 30),  # 3.15625 bpw (K=3, plain,    nl=8,  h=2, u8 16B)
+    ("VTQ_300",      31),  # 3.15625 bpw (K=3, plain,    nl=16, h=2, u8 32B)
+    ("VTQ_325",      32),  # 3.40625 bpw (K=4, D4_eq,    nl=16, h=2, at2_16_16)
+    ("VTQ_350",      35),  # 3.65625 bpw (K=4, Gosset84, nl=16, h=2, at2_16_16)
+    ("VTQ_375",      37),  # 3.90625 bpw (K=4, D4,       nl=16, h=2, at2_16_16)
+    ("VTQ_400",      40),  # 4.21875 bpw (K=4, plain,    nl=16, h=3, at2_16_16)
+    ("VTQ_425",      42),  # 4.40625 bpw (K=5, D4_eq,    nl=16, h=2, at2z_32_32)
+    ("VTQ_450",      45),  # 4.65625 bpw (K=5, Gosset84, nl=16, h=2, at2z_32_32)
+    ("VTQ_475",      47),  # 4.90625 bpw (K=5, D4,       nl=16, h=2, at2z_32_32)
+    ("VTQ_500_FAST", 50),  # 5.21875 bpw (K=5, plain,    nl=4,  h=3, u8 32B)
+    ("VTQ_500",      51),  # 5.21875 bpw (K=5, plain,    nl=16, h=3, at2z_32_32)
+    ("VTQ_550",      55),  # 5.71875 bpw (K=6, Gosset84, nl=16, h=3, at2z_32_32)
+    ("VTQ_575",      57),  # 5.96875 bpw (K=6, D4,       nl=16, h=3, at2z_32_32)
+    ("VTQ_600",      60),  # 6.21875 bpw (K=6, plain,    nl=16, h=3, at2z_32_32)
 ]
 
 def _mem_mark(tag: str):
@@ -113,13 +113,13 @@ _NL_TO_M_EXTRA = {16: (40, 475), 8: (462,), 4: ()}
 # 1. Fast Radix-4 `__ballot_sync` CUDA Viterbi & `16x16` Intra-Subblock `Block16-LDLQ` Wrappers
 # =================================================================================================
 
-def _code_to_vtq3_pack(
+def _code_to_vtq_pack(
     gi_2d: torch.Tensor,     # uint8 [M, 256]
     idx_2d: torch.Tensor,    # int16/int32 [M, 256] (`lb * U + bu`)
     U: int,
     return_labels: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Converts `(gi_2d, idx_2d)` (`[M, 256]` natural order) into `(g_sub, c_all, u_all, lb_out)` for `vtq3_st16_k*_t`."""
+    """Converts `(gi_2d, idx_2d)` (`[M, 256]` natural order) into `(g_sub, c_all, u_all, lb_out)` for `vtq_st16_k*_t`."""
     M = idx_2d.shape[0]
     ix = idx_2d.to(torch.int32)
     g_sub = gi_2d[:, ::16].to(torch.uint8).contiguous()
@@ -133,7 +133,7 @@ def _code_to_vtq3_pack(
 
 
 @torch.no_grad()
-def viterbi_vtq3_cuda(
+def viterbi_vtq_cuda(
     x: torch.Tensor,                      # float32 [M, 256] (`M % 16 == 0`)
     w: torch.Tensor,                      # float32 [M, 256] or [256]
     tab: torch.Tensor,                    # float32 [nl * U]
@@ -191,12 +191,12 @@ def viterbi_vtq3_cuda(
     rec = rec_t.view(nbg, 16, 16, 16).permute(0, 2, 1, 3).reshape(M, 256).contiguous()
     gi_2d = gi_t.view(nbg, 16, 16, 16).permute(0, 2, 1, 3).reshape(M, 256).to(torch.uint8)
     idx_2d = idx_t.view(nbg, 16, 16, 16).permute(0, 2, 1, 3).reshape(M, 256)
-    g_out, c_out, u_out, lb_out = _code_to_vtq3_pack(gi_2d, idx_2d, U, return_labels=return_labels)
+    g_out, c_out, u_out, lb_out = _code_to_vtq_pack(gi_2d, idx_2d, U, return_labels=return_labels)
     return rec, g_out, c_out, u_out, lb_out
 
 
 @torch.no_grad()
-def ldlq_vtq3_block256_cuda(
+def ldlq_vtq_block256_cuda(
     w_work: torch.Tensor,       # float32 [M, 256] (modified in-place by causal Cholesky feedback)
     d_sb: torch.Tensor,         # float32 [M]
     dw_blk: torch.Tensor,       # float32 [256]
@@ -227,7 +227,7 @@ def ldlq_vtq3_block256_cuda(
                 w_work, d_sb, dw_blk, U_blk, U_blk_inv, tab, K, 10, 359, gains,
                 n_cand=n_cand, tb_window=tb_win, m_extra=m_extra, pair_parity=pp, return_code=True,
             )
-            g_sub, c_all, u_all, _ = _code_to_vtq3_pack(gi_2d, idx_2d, U, return_labels=False)
+            g_sub, c_all, u_all, _ = _code_to_vtq_pack(gi_2d, idx_2d, U, return_labels=False)
             return G_nat, g_sub, c_all, u_all
         G_nat = ldlq_block256_cuda(
             w_work, d_sb, dw_blk, U_blk, U_blk_inv, tab, K, 10, 359, gains,
@@ -247,7 +247,7 @@ def ldlq_vtq3_block256_cuda(
                 n_cand=n_cand, tb_window=tb_win, m_extra=m_extra, pair_parity=pp, return_code=True,
             )
             G_nat[r0:r1] = gp
-            gs_s, cs_s, us_s, _ = _code_to_vtq3_pack(gi_s, ix_s, U, return_labels=False)
+            gs_s, cs_s, us_s, _ = _code_to_vtq_pack(gi_s, ix_s, U, return_labels=False)
             g_sub[r0:r1] = gs_s
             c_all[r0:r1] = cs_s
             u_all[r0:r1] = us_s
@@ -262,20 +262,20 @@ def ldlq_vtq3_block256_cuda(
 
 
 # =================================================================================================
-# 2. Format Registry (`liqk_v2.LIQK_V2_SPECS`, `SPEC_DISTORTION_RATIO`, `equal_bpw.SETS["VTQ3"]`)
+# 2. Format Registry (`liqk_v2.LIQK_V2_SPECS`, `SPEC_DISTORTION_RATIO`, `equal_bpw.SETS["VTQ"]`)
 # =================================================================================================
 
-def load_and_register_vtq3(tables_path: Path | None = None) -> Dict[str, dict]:
-    """Loads `results/vtq_v3_tables.json` and registers all VTQ v3 specs into `liqk_v2` and `equal_bpw.SETS`."""
-    global VTQ3_MENU
+def load_and_register_vtq(tables_path: Path | None = None) -> Dict[str, dict]:
+    """Loads `results/vtq_tables.json` and registers all VTQ specs into `liqk_v2` and `equal_bpw.SETS`."""
+    global VTQ_MENU
     if tables_path is None:
         tables_path = DEFAULT_TABLES_PATH
     tables_path = Path(tables_path)
     if not tables_path.exists():
-        return VTQ3_CONFIG
+        return VTQ_CONFIG
 
     raw = json.loads(tables_path.read_text(encoding="utf-8"))
-    VTQ3_CONFIG.clear()
+    VTQ_CONFIG.clear()
     _GPU_TAB_CACHE.clear()
 
     frac_sub = {0: 0.0, 1: 0.5, 2: 0.25, 3: 0.75}
@@ -285,7 +285,7 @@ def load_and_register_vtq3(tables_path: Path | None = None) -> Dict[str, dict]:
         hw = dict(c["hw_codebook"])
         g_raw = c.get("gain_u8", c.get("gain_i"))
         gain_u8 = np.clip(np.asarray(g_raw, dtype=np.int32), 1, 255).astype(np.uint8)
-        lut = reconstruct_lut_from_hw_vtq3(fc, hw)
+        lut = reconstruct_lut_from_hw_vtq(fc, hw)
         gains_np = gain_u8.astype(np.float32) * GAIN_UNIT
 
         cfg = dict(c)
@@ -297,7 +297,7 @@ def load_and_register_vtq3(tables_path: Path | None = None) -> Dict[str, dict]:
         cfg["gain_u8"] = [int(x) for x in gain_u8.tolist()]
         cfg["lut_np"] = lut
         cfg["gains_np"] = gains_np
-        VTQ3_CONFIG[name] = cfg
+        VTQ_CONFIG[name] = cfg
 
         assert st_bytes % SUPER_ROWS == 0
         bits_256 = (st_bytes * 8.0 / SUPER_ROWS) + 2.0
@@ -311,22 +311,22 @@ def load_and_register_vtq3(tables_path: Path | None = None) -> Dict[str, dict]:
         if "distortion_ratio" in c:
             lv2.SPEC_DISTORTION_RATIO[name] = float(c["distortion_ratio"])
 
-    VTQ3_MENU = [nm for nm in VTQ3_CONFIG if nm not in ("VTQ3_300_FAST", "VTQ3_500_FAST")]
+    VTQ_MENU = [nm for nm in VTQ_CONFIG if nm not in ("VTQ_300_FAST", "VTQ_500_FAST")]
     try:
         import src.equal_bpw as eqb
 
-        eqb.SETS["VTQ3"] = list(VTQ3_MENU)
-        eqb.SETS["VTQ3_FAST"] = [nm for nm in VTQ3_CONFIG if nm not in ("VTQ3_300", "VTQ3_500")]
+        eqb.SETS["VTQ"] = list(VTQ_MENU)
+        eqb.SETS["VTQ_FAST"] = [nm for nm in VTQ_CONFIG if nm not in ("VTQ_300", "VTQ_500")]
     except Exception:
         pass
-    return VTQ3_CONFIG
+    return VTQ_CONFIG
 
 
-def vtq3_candidates_for_target(target_bpw: float, menu: Optional[List[str]] = None) -> List[str]:
-    """Filters `VTQ3_MENU` to `[target_bpw - 0.45, 6.30]` so linear DP never starves sensitive slices."""
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
-    base_menu = menu if menu is not None else VTQ3_MENU
+def vtq_candidates_for_target(target_bpw: float, menu: Optional[List[str]] = None) -> List[str]:
+    """Filters `VTQ_MENU` to `[target_bpw - 0.45, 6.30]` so linear DP never starves sensitive slices."""
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
+    base_menu = menu if menu is not None else VTQ_MENU
     lo = float(target_bpw) - 0.45
     cands = [sp for sp in base_menu if lv2.LIQK_V2_SPECS[sp].bpw >= lo]
     below = [sp for sp in cands if lv2.LIQK_V2_SPECS[sp].bpw <= float(target_bpw) - 0.02]
@@ -340,10 +340,10 @@ def vtq3_candidates_for_target(target_bpw: float, menu: Optional[List[str]] = No
     return cands if cands else list(base_menu)
 
 
-def _get_spec_gpu_vtq3(spec_name: str, dev: torch.device) -> Tuple[dict, torch.Tensor, torch.Tensor]:
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
-    cfg = VTQ3_CONFIG[spec_name]
+def _get_spec_gpu_vtq(spec_name: str, dev: torch.device) -> Tuple[dict, torch.Tensor, torch.Tensor]:
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
+    cfg = VTQ_CONFIG[spec_name]
     key = (spec_name, dev)
     if key not in _GPU_TAB_CACHE:
         _GPU_TAB_CACHE[key] = (
@@ -355,11 +355,11 @@ def _get_spec_gpu_vtq3(spec_name: str, dev: torch.device) -> Tuple[dict, torch.T
 
 
 # =================================================================================================
-# 3. Core VTQ v3 Matrix Quantizer (`Outer-DCT` + Natural `Block16-LDLQ` + `fp16 d_row * uint8 u_sb`)
+# 3. Core VTQ Matrix Quantizer (`Outer-DCT` + Natural `Block16-LDLQ` + `fp16 d_row * uint8 u_sb`)
 # =================================================================================================
 
 @torch.no_grad()
-def compute_suh_vtq3(
+def compute_suh_vtq(
     W_f32: torch.Tensor,
     H_f32: torch.Tensor,
     seed: int = 1337,
@@ -384,16 +384,16 @@ def compute_suh_vtq3(
     scale_suh = ((col_rms ** 0.50) * (h_std ** -0.25)).clamp(0.25, 4.0)
     suh = (signs * scale_suh).to(torch.float16).to(torch.float32)
 
-    W_rot = apply_vtq3_rot(W_f32 / suh.unsqueeze(0), rot_block=rot_block, transpose=False)
-    H_tmp = apply_vtq3_rot(H_f32 * suh.unsqueeze(0), rot_block=rot_block, transpose=False)
-    H_rot = apply_vtq3_rot((H_tmp.T * suh.unsqueeze(0)).contiguous(), rot_block=rot_block, transpose=False)
+    W_rot = apply_vtq_rot(W_f32 / suh.unsqueeze(0), rot_block=rot_block, transpose=False)
+    H_tmp = apply_vtq_rot(H_f32 * suh.unsqueeze(0), rot_block=rot_block, transpose=False)
+    H_rot = apply_vtq_rot((H_tmp.T * suh.unsqueeze(0)).contiguous(), rot_block=rot_block, transpose=False)
     del H_tmp
     H_rot = (0.5 * (H_rot + H_rot.T)).contiguous()
     return W_rot, H_rot, suh
 
 
 @torch.no_grad()
-def _quantize_rows_vtq3_ldlq(
+def _quantize_rows_vtq_ldlq(
     W_sub: torch.Tensor,                      # float32 [R, Kin] in natural column order (`R % 16 == 0`)
     U_nat: torch.Tensor,                      # float32 [Kin, Kin]
     U_blks: torch.Tensor,                     # float32 [nblocks, 256, 256]
@@ -410,9 +410,9 @@ def _quantize_rows_vtq3_ldlq(
     """
     dev = W_sub.device
     R, Kin = W_sub.shape
-    assert R % SUPER_ROWS == 0, f"VTQ v3 requires row slice multiple of 16, got R={R}"
+    assert R % SUPER_ROWS == 0, f"VTQ requires row slice multiple of 16, got R={R}"
     nblocks = Kin // TILE
-    cfg, tab, gains = _get_spec_gpu_vtq3(spec_name, dev)
+    cfg, tab, gains = _get_spec_gpu_vtq(spec_name, dev)
     K = int(cfg["K"])
     U = 1 << (K - 1)
     nl = int(cfg["nl"])
@@ -444,11 +444,11 @@ def _quantize_rows_vtq3_ldlq(
         d_init = (step_row * u_init_f).clamp(min=1e-10)
 
         if emit_pack:
-            G_blk, g_b, c_b, u_b = ldlq_vtq3_block256_cuda(
+            G_blk, g_b, c_b, u_b = ldlq_vtq_block256_cuda(
                 w_blk_start.clone(), d_init, dw_blk, U_blk, U_blk_inv, tab, gains, nl, U, frac=frac, return_code=True
             )
         else:
-            G_blk, _ = ldlq_vtq3_block256_cuda(
+            G_blk, _ = ldlq_vtq_block256_cuda(
                 w_blk_start.clone(), d_init, dw_blk, U_blk, U_blk_inv, tab, gains, nl, U, frac=frac, return_code=False
             )
             g_b = c_b = u_b = None
@@ -508,11 +508,11 @@ def _quantize_rows_vtq3_ldlq(
                 cands = []
                 if run_ldlq_gs and sw == 0:
                     if emit_pack:
-                        Gb_ld, gb_ld, cb_ld, ub_ld = ldlq_vtq3_block256_cuda(
+                        Gb_ld, gb_ld, cb_ld, ub_ld = ldlq_vtq_block256_cuda(
                             w_gs.clone(), d_old, dwb_gs, Ub_b, U_v, tab, gains, nl, U, frac=frac, return_code=True
                         )
                     else:
-                        Gb_ld, _ = ldlq_vtq3_block256_cuda(
+                        Gb_ld, _ = ldlq_vtq_block256_cuda(
                             w_gs.clone(), d_old, dwb_gs, Ub_b, U_v, tab, gains, nl, U, frac=frac, return_code=False
                         )
                         gb_ld = cb_ld = ub_ld = None
@@ -523,7 +523,7 @@ def _quantize_rows_vtq3_ldlq(
                 d_cur = (step_row * u_sb_all[:, ibl].float()).clamp(min=1e-10)
                 Bc_cur = Gb_cur @ U_v
                 z_gs = d_cur.unsqueeze(1) * Gb_cur + (Ac - d_cur.unsqueeze(1) * Bc_cur) / diag_uv.unsqueeze(0)
-                Gb_vt, gb_vt, cb_vt, ub_vt, _ = viterbi_vtq3_cuda(
+                Gb_vt, gb_vt, cb_vt, ub_vt, _ = viterbi_vtq_cuda(
                     z_gs / d_cur.unsqueeze(1), dwb_gs, tab, gains, nl, U, frac=frac, return_labels=False
                 )
                 cands.append((Gb_vt, gb_vt, cb_vt, ub_vt))
@@ -571,7 +571,7 @@ def resolve_rot_block(subname: Optional[str], rot_block: int = -1, rot_mode: str
 
 
 @torch.no_grad()
-def quantize_matrix_vtq3(
+def quantize_matrix_vtq(
     W: torch.Tensor,
     H: torch.Tensor,
     spec_or_row_specs: str | List[Tuple[int, int, str]],
@@ -583,22 +583,22 @@ def quantize_matrix_vtq3(
     u_sb_gecd_sweeps: Optional[int] = None,
     d_sb_gecd_sweeps: Optional[int] = None,
 ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, float]:
-    """Quantizes `W [M, Kin]` (`Kin % 256 == 0`) into VTQ v3 with bit-exact `assemble_vtq3` output."""
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
+    """Quantizes `W [M, Kin]` (`Kin % 256 == 0`) into VTQ with bit-exact `assemble_vtq` output."""
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
     if d_sb_gecd_sweeps is not None:
         u_sb_gecd_sweeps = int(d_sb_gecd_sweeps)
     elif u_sb_gecd_sweeps is None:
-        u_sb_gecd_sweeps = int(os.environ.get("VTQ3_GS_SWEEPS", "0"))
+        u_sb_gecd_sweeps = int(os.environ.get("VTQ_GS_SWEEPS", "0"))
 
     dev = W.device
     W_src = (W_target if W_target is not None else W).float()
     H_f32 = H.float()
     M, Kin = W_src.shape
-    assert Kin % TILE == 0, f"VTQ v3 requires Kin % 256 == 0, got Kin={Kin}"
+    assert Kin % TILE == 0, f"VTQ requires Kin % 256 == 0, got Kin={Kin}"
     nblocks = Kin // TILE
 
-    W_rot, H_rot, suh = compute_suh_vtq3(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block)
+    W_rot, H_rot, suh = compute_suh_vtq(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block)
     _mem_mark("suh_rot")
     dmean = H_rot.diagonal().mean().clamp(min=1e-8)
     # `H_rot` is only needed afterwards by the two-sided Gauss-Seidel polish (`u_sb_gecd_sweeps > 0`); otherwise
@@ -662,7 +662,7 @@ def quantize_matrix_vtq3(
 
     for sp, ranges in by_spec.items():
         rows_idx = torch.cat([torch.arange(r0, r1, device=dev) for r0, r1 in ranges], dim=0)
-        sub_out = _quantize_rows_vtq3_ldlq(
+        sub_out = _quantize_rows_vtq_ldlq(
             W_rot[rows_idx],
             U_nat,
             U_blks,
@@ -684,11 +684,11 @@ def quantize_matrix_vtq3(
     del U_nat, U_blks, U_blks_inv, gs_ctx, W_rot
     _mem_mark("ldlq")
 
-    # Exact bit-accurate reconstruction + `VTQ3_REFIT_SWEEPS` alternating `(c_row -> d_row, suh)` global refit sweeps:
+    # Exact bit-accurate reconstruction + `VTQ_REFIT_SWEEPS` alternating `(c_row -> d_row, suh)` global refit sweeps:
     suh_fp16 = suh.to(torch.float16)
     d_eff_base = d_row_all.float().unsqueeze(1) * (u_sb_all.float() * float(U_SB_UNIT))
     W_rot_hat = (G_nat_all.view(M, nblocks, TILE) * d_eff_base.unsqueeze(-1)).reshape(M, Kin)
-    U_base = apply_vtq3_rot(W_rot_hat, rot_block=rot_block, transpose=True)
+    U_base = apply_vtq_rot(W_rot_hat, rot_block=rot_block, transpose=True)
     W_hat_eff = U_base * suh_fp16.float().unsqueeze(0)
     del U_base
     if not emit_pack:
@@ -703,14 +703,14 @@ def quantize_matrix_vtq3(
         rw = None
 
     # Two sweeps give the same SNR as one (<= 0.001 bit on 12 real Llama-3.2-3B matrices) for ~+20% encoder time on wide `K`.
-    for _ in range(int(os.environ.get("VTQ3_REFIT_SWEEPS", "1"))):
+    for _ in range(int(os.environ.get("VTQ_REFIT_SWEEPS", "1"))):
         c_row = (W_hat_eff * HW).sum(dim=1) / (W_hat_eff * HQ).sum(dim=1).clamp(min=1e-12)
         c_row = torch.where(torch.isfinite(c_row) & (c_row > 0.5) & (c_row < 2.0), c_row, torch.ones_like(c_row))
         d_row_cand = (d_row_all.float() * c_row).to(torch.float16)
 
         d_eff_cand = d_row_cand.float().unsqueeze(1) * (u_sb_all.float() * float(U_SB_UNIT))
         W_rot_cand = (G_nat_all.view(M, nblocks, TILE) * d_eff_cand.unsqueeze(-1)).reshape(M, Kin)
-        U_scaled = apply_vtq3_rot(W_rot_cand, rot_block=rot_block, transpose=True)
+        U_scaled = apply_vtq_rot(W_rot_cand, rot_block=rot_block, transpose=True)
         if not emit_pack:
             del W_rot_cand
         U_w = (U_scaled * rw.unsqueeze(1)) if rw is not None else U_scaled
@@ -745,7 +745,7 @@ def quantize_matrix_vtq3(
     _mem_mark("refit")
 
     if emit_pack and pm is not None:
-        W_hat_eff = assemble_vtq3(G_nat_all, d_row_all, u_sb_all, suh_fp16, rot_block=rot_block)
+        W_hat_eff = assemble_vtq(G_nat_all, d_row_all, u_sb_all, suh_fp16, rot_block=rot_block)
         HQ = W_hat_eff @ H_f32
         pack_dict = {
             "row_slices": row_slices,
@@ -784,7 +784,7 @@ def _normal_quantiles(n: int) -> np.ndarray:
 
 def _fit_additive_u8(pos_mat: np.ndarray, K_base: int, nl: int, tp: str, qmax: int = 127) -> Tuple[list[int], list[int]]:
     """Fits integer `TA_u8, TB_u8 >= 0` with `TA[idxA] + TB[idxB] <= qmax` (zero clipping!) via LSQ + coordinate polish."""
-    idxA, idxB = _at2_indices_vtq3(K_base, nl, tp)
+    idxA, idxB = _at2_indices_vtq(K_base, nl, tp)
     nA = 16 if tp == "at2_16_16" else 32
     nB = nA
     u_cnt = pos_mat.shape[0]
@@ -863,8 +863,8 @@ def _pos_mags_to_hw(fmt_code: int, pos_vals: np.ndarray, qmax: int = 127) -> Tup
     return {"type": "u8", "qmax": int(qmax), "tab_div": 64, "tab_u8": [int(x) for x in tab_u8.tolist()]}, float(stretch)
 
 
-def _bucket_mapping_vtq3(fmt_code: int) -> Tuple[np.ndarray, np.ndarray, int]:
-    """Maps `(lb, u)` -> `(param_idx in 0..m_mag-1, sign in {-1.0, +1.0})` matching `reconstruct_lut_from_hw_vtq3`."""
+def _bucket_mapping_vtq(fmt_code: int) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Maps `(lb, u)` -> `(param_idx in 0..m_mag-1, sign in {-1.0, +1.0})` matching `reconstruct_lut_from_hw_vtq`."""
     K_base, _, nl, _, _ = FMT_META[fmt_code]
     U = 1 << (K_base - 1)
     p_idx = np.empty((nl, U), dtype=np.int64)
@@ -891,7 +891,7 @@ def _bucket_mapping_vtq3(fmt_code: int) -> Tuple[np.ndarray, np.ndarray, int]:
 
 
 @torch.no_grad()
-def _eval_vtq3_cand_on_blocks(
+def _eval_vtq_cand_on_blocks(
     X_sb: torch.Tensor,         # float32 [N_sb, 256] unit-RMS superblocks
     w_ones: torch.Tensor,       # float32 [256]
     lut_t: torch.Tensor,        # float32 [nl * U]
@@ -902,12 +902,12 @@ def _eval_vtq3_cand_on_blocks(
     frac: int,
 ) -> Tuple[float, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Evaluates `(lut, gains, scale)` via exact `L = 256` 2-pass tail-biting joint `(gain, 1024-state)` Viterbi
-    and discrete `u_sb` (`1..255`, `* 1/128`, centered at `208` matching `quantize_matrix_vtq3`)."""
+    and discrete `u_sb` (`1..255`, `* 1/128`, centered at `208` matching `quantize_matrix_vtq`)."""
     d_row_val = float(scale) * (128.0 / 208.0)
     d0 = d_row_val * (208.0 * float(U_SB_UNIT))
     X_norm = (X_sb / max(d0, 1e-10)).contiguous()
 
-    G_sb, g_out, _, u_out, lb_out = viterbi_vtq3_cuda(
+    G_sb, g_out, _, u_out, lb_out = viterbi_vtq_cuda(
         X_norm, w_ones, lut_t, gains_t, nl, U, frac=frac, return_labels=True
     )
     num = (X_sb * G_sb).sum(dim=1)
@@ -920,35 +920,35 @@ def _eval_vtq3_cand_on_blocks(
 
 
 _V2_WARMSTART_MAP: Dict[str, str] = {
-    "VTQ3_150": "VTQ150",
-    "VTQ3_175": "VTQ175",
-    "VTQ3_200": "VTQ200",
-    "VTQ3_225": "VTQ225",
-    "VTQ3_250": "VTQ250",
-    "VTQ3_250_H2": "VTQ250_H2",
-    "VTQ3_275": "VTQ275",
-    "VTQ3_275_H2": "VTQ275_H2",
-    "VTQ3_300": "VTQ300",
-    "VTQ3_325": "VTQ325",
-    "VTQ3_350": "VTQ350",
-    "VTQ3_375": "VTQ375",
-    "VTQ3_400": "VTQ400",
-    "VTQ3_425": "VTQ425",
-    "VTQ3_450": "VTQ450",
-    "VTQ3_475": "VTQ475",
-    "VTQ3_500": "VTQ500",
-    "VTQ3_550": "VTQ550",
-    "VTQ3_575": "VTQ575",
-    "VTQ3_600": "VTQ600",
+    "VTQ_150": "VTQ150",
+    "VTQ_175": "VTQ175",
+    "VTQ_200": "VTQ200",
+    "VTQ_225": "VTQ225",
+    "VTQ_250": "VTQ250",
+    "VTQ_250_H2": "VTQ250_H2",
+    "VTQ_275": "VTQ275",
+    "VTQ_275_H2": "VTQ275_H2",
+    "VTQ_300": "VTQ300",
+    "VTQ_325": "VTQ325",
+    "VTQ_350": "VTQ350",
+    "VTQ_375": "VTQ375",
+    "VTQ_400": "VTQ400",
+    "VTQ_425": "VTQ425",
+    "VTQ_450": "VTQ450",
+    "VTQ_475": "VTQ475",
+    "VTQ_500": "VTQ500",
+    "VTQ_550": "VTQ550",
+    "VTQ_575": "VTQ575",
+    "VTQ_600": "VTQ600",
 }
 
 
 @torch.no_grad()
-def train_vtq3_tables(
+def train_vtq_tables(
     out_path: Path = DEFAULT_TABLES_PATH,
     calibrate_model_dir: Optional[Path] = None,
 ) -> Dict[str, dict]:
-    """Trains all 22 hardware-exact `VTQ v3` codebooks (`qmax = 127`) & `gain_u8` (`sub = 16`) + calibrates `distortion_ratio`."""
+    """Trains all 22 hardware-exact `VTQ` codebooks (`qmax = 127`) & `gain_u8` (`sub = 16`) + calibrates `distortion_ratio`."""
     from src.vtq_v2_format import reconstruct_lut_from_hw as _rec_lut_v2
 
     t_all = time.perf_counter()
@@ -969,15 +969,15 @@ def train_vtq3_tables(
 
     frac_sub = {0: 0.0, 1: 0.5, 2: 0.25, 3: 0.75}
     trained: Dict[str, dict] = {}
-    print(f"=== Training {len(VTQ3_SPECS_DEF)} Hardware-Exact VTQ v3 Codebooks (`qmax=127`, `sub=16`) on {torch.cuda.get_device_name(0)} ===", flush=True)
+    print(f"=== Training {len(VTQ_SPECS_DEF)} Hardware-Exact VTQ Codebooks (`qmax=127`, `sub=16`) on {torch.cuda.get_device_name(0)} ===", flush=True)
 
-    for name, fc in VTQ3_SPECS_DEF:
+    for name, fc in VTQ_SPECS_DEF:
         t0 = time.perf_counter()
         K, frac, nl, h, st_bytes = FMT_META[fc]
         U = 1 << (K - 1)
         G_cnt = 1 << h
         qmax = 127
-        p_idx_np, p_sgn_np, m_mag = _bucket_mapping_vtq3(fc)
+        p_idx_np, p_sgn_np, m_mag = _bucket_mapping_vtq(fc)
         p_idx_t = torch.tensor(p_idx_np, dtype=torch.long, device=dev)
         p_sgn_t = torch.tensor(p_sgn_np, dtype=torch.float32, device=dev)
 
@@ -1014,11 +1014,11 @@ def train_vtq3_tables(
 
         def _check_cand(hw_c: dict, gi_c: np.ndarray, sc_c: float):
             nonlocal best_val_mse, best_cfg
-            lut_t_c = torch.tensor(reconstruct_lut_from_hw_vtq3(fc, hw_c), dtype=torch.float32, device=dev)
+            lut_t_c = torch.tensor(reconstruct_lut_from_hw_vtq(fc, hw_c), dtype=torch.float32, device=dev)
             gains_t_c = torch.tensor(gi_c.astype(np.float32) * GAIN_UNIT, dtype=torch.float32, device=dev)
             for sc_mul in (0.95, 0.98, 1.00, 1.02, 1.05):
                 sc_try = sc_c * sc_mul
-                mse_v, _, _, _, _ = _eval_vtq3_cand_on_blocks(X_val, w_ones, lut_t_c, gains_t_c, sc_try, nl, U, frac)
+                mse_v, _, _, _, _ = _eval_vtq_cand_on_blocks(X_val, w_ones, lut_t_c, gains_t_c, sc_try, nl, U, frac)
                 if mse_v < best_val_mse:
                     best_val_mse = mse_v
                     best_cfg = {
@@ -1035,10 +1035,10 @@ def train_vtq3_tables(
             _check_cand(hw_cur, gain_u8_cur, scale_cur)
 
             for it in range(n_it):
-                lut_np = reconstruct_lut_from_hw_vtq3(fc, hw_cur)
+                lut_np = reconstruct_lut_from_hw_vtq(fc, hw_cur)
                 lut_t = torch.tensor(lut_np, dtype=torch.float32, device=dev)
                 gains_t = torch.tensor(gain_u8_cur.astype(np.float32) * GAIN_UNIT, dtype=torch.float32, device=dev)
-                _, d_opt, g_out, flat_idx, _ = _eval_vtq3_cand_on_blocks(
+                _, d_opt, g_out, flat_idx, _ = _eval_vtq_cand_on_blocks(
                     X_gauss, w_ones, lut_t, gains_t, scale_cur, nl, U, frac
                 )
                 X_norm = X_gauss / d_opt.clamp(min=1e-10)
@@ -1056,7 +1056,7 @@ def train_vtq3_tables(
                 if fc in (15, 17):
                     cur_pos_norm = np.asarray(hw_cur["tab_s8"][16:], dtype=np.float64) / 64.0
                 else:
-                    cur_pos_norm = hw_to_canon_u8_vtq3(fc, hw_cur).astype(np.float64) / 64.0
+                    cur_pos_norm = hw_to_canon_u8_vtq(fc, hw_cur).astype(np.float64) / 64.0
                 upd = num_b.cpu().numpy() / np.maximum(den_b.cpu().numpy(), 1e-12)
                 has_cnt = den_b.cpu().numpy() > 10.0
                 new_pos = np.where(has_cnt, np.maximum(upd, 0.0), cur_pos_norm)
@@ -1064,7 +1064,7 @@ def train_vtq3_tables(
                 hw_cur, scale_cur = _pos_mags_to_hw(fc, blended_world, qmax)
 
                 if 1 <= it <= n_it - 2 and G_cnt > 1:
-                    lut_new_t = torch.tensor(reconstruct_lut_from_hw_vtq3(fc, hw_cur), dtype=torch.float32, device=dev)
+                    lut_new_t = torch.tensor(reconstruct_lut_from_hw_vtq(fc, hw_cur), dtype=torch.float32, device=dev)
                     # Note: each subblock `g` of `X_gauss [N_sb, 256]` has row-wise gains `g_out [N_sb, 16]`
                     tab_vals = lut_new_t[flat_idx].view(N_sb, 16, 16)
                     xn_sub = (X_gauss / (d_opt * (scale_cur / max(stretch, 1e-8))).clamp(min=1e-10)).view(N_sb, 16, 16)
@@ -1096,7 +1096,7 @@ def train_vtq3_tables(
         # Discrete coordinate polish (`gain_u8 +- 2`, `+- 1`, and fine `scale`) on `X_val`
         assert best_cfg is not None
         hw_b = best_cfg["hw_codebook"]
-        lut_b = torch.tensor(reconstruct_lut_from_hw_vtq3(fc, hw_b), dtype=torch.float32, device=dev)
+        lut_b = torch.tensor(reconstruct_lut_from_hw_vtq(fc, hw_b), dtype=torch.float32, device=dev)
         gi_b = best_cfg["gain_u8"].astype(np.int32).copy()
         sc_b = best_cfg["scale"]
 
@@ -1110,14 +1110,14 @@ def train_vtq3_tables(
                     if g_pos + 1 < len(gi_try) and gi_try[g_pos] >= gi_try[g_pos + 1]:
                         continue
                     gt = torch.tensor(gi_try.astype(np.float32) * GAIN_UNIT, dtype=torch.float32, device=dev)
-                    mse_v, _, _, _, _ = _eval_vtq3_cand_on_blocks(X_val, w_ones, lut_b, gt, sc_b, nl, U, frac)
+                    mse_v, _, _, _, _ = _eval_vtq_cand_on_blocks(X_val, w_ones, lut_b, gt, sc_b, nl, U, frac)
                     if mse_v < best_val_mse:
                         best_val_mse = mse_v
                         gi_b = gi_try
 
         gt_fin = torch.tensor(gi_b.astype(np.float32) * GAIN_UNIT, dtype=torch.float32, device=dev)
         for sc_mul in (0.97, 0.985, 1.00, 1.015, 1.03):
-            mse_v, _, _, _, _ = _eval_vtq3_cand_on_blocks(X_val, w_ones, lut_b, gt_fin, sc_b * sc_mul, nl, U, frac)
+            mse_v, _, _, _, _ = _eval_vtq_cand_on_blocks(X_val, w_ones, lut_b, gt_fin, sc_b * sc_mul, nl, U, frac)
             if mse_v < best_val_mse:
                 best_val_mse = mse_v
                 sc_b = sc_b * sc_mul
@@ -1157,27 +1157,27 @@ def train_vtq3_tables(
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(trained, indent=2), encoding="utf-8")
-    load_and_register_vtq3(out_path)
+    load_and_register_vtq(out_path)
 
     if calibrate_model_dir is None:
         cand_dir = ROOT / "models" / "Llama-3.2-3B-Instruct"
         if cand_dir.exists():
             calibrate_model_dir = cand_dir
     if calibrate_model_dir is not None and Path(calibrate_model_dir).exists():
-        calibrate_vtq3_distortion_ratios(Path(calibrate_model_dir), out_path)
-    print(f"=== Saved {len(trained)} VTQ v3 specs to {out_path} in {time.perf_counter()-t_all:.1f}s ===", flush=True)
+        calibrate_vtq_distortion_ratios(Path(calibrate_model_dir), out_path)
+    print(f"=== Saved {len(trained)} VTQ specs to {out_path} in {time.perf_counter()-t_all:.1f}s ===", flush=True)
     return trained
 
 
 @torch.no_grad()
-def calibrate_vtq3_distortion_ratios(model_dir: Path, tables_path: Path = DEFAULT_TABLES_PATH):
-    """Calibrates `SPEC_DISTORTION_RATIO` on real `Llama-3.2-3B-Instruct` layers (`Loss_VTQ3 / Loss_diag_LIQK3_V2`)."""
+def calibrate_vtq_distortion_ratios(model_dir: Path, tables_path: Path = DEFAULT_TABLES_PATH):
+    """Calibrates `SPEC_DISTORTION_RATIO` on real `Llama-3.2-3B-Instruct` layers (`Loss_VTQ / Loss_diag_LIQK3_V2`)."""
     from safetensors.torch import load_file
     from transformers import AutoModelForCausalLM
 
-    print(f"\n=== Calibrating VTQ v3 `distortion_ratio` on `{model_dir.name}` ===", flush=True)
+    print(f"\n=== Calibrating VTQ `distortion_ratio` on `{model_dir.name}` ===", flush=True)
     dev = torch.device("cuda")
-    load_and_register_vtq3(tables_path)
+    load_and_register_vtq(tables_path)
     raw = json.loads(Path(tables_path).read_text(encoding="utf-8"))
 
     cal_ids = load_file(str(ROOT / "data" / "cal_trace.safetensors"))["input_ids"][:16, :1024]
@@ -1225,7 +1225,7 @@ def calibrate_vtq3_distortion_ratios(model_dir: Path, tables_path: Path = DEFAUL
                     W_m = W_full
                 del W_full
                 seed_m = 1000 + l_idx * 10 + sub_i
-                W_rot, H_rot, _ = compute_suh_vtq3(W_m, H_m, seed=seed_m, rot_block=-1)
+                W_rot, H_rot, _ = compute_suh_vtq(W_m, H_m, seed=seed_m, rot_block=-1)
                 diag_h = torch.diagonal(H_rot).clamp(min=1e-8)
                 diff3 = W_rot - lv2.quantize_liqk_v2_diag_rot(W_rot, diag_h, "LIQK3_V2")
                 base_loss = float(((diff3 @ H_rot) * diff3).sum().clamp(min=1e-12).item())
@@ -1233,7 +1233,7 @@ def calibrate_vtq3_distortion_ratios(model_dir: Path, tables_path: Path = DEFAUL
 
                 HW = W_m @ H_m
                 for nm in raw:
-                    _, W_hat, _ = quantize_matrix_vtq3(
+                    _, W_hat, _ = quantize_matrix_vtq(
                         W_m, H_m, nm, seed=seed_m, damp=0.20, rot_block=-1, u_sb_gecd_sweeps=None
                     )
                     dW = W_m - W_hat
@@ -1265,7 +1265,7 @@ def calibrate_vtq3_distortion_ratios(model_dir: Path, tables_path: Path = DEFAUL
         print(f"  [Calibrated] {nm:13s} bpw={raw[nm]['bpw_256']:.5f} -> distortion_ratio={geom:.5f}", flush=True)
 
     Path(tables_path).write_text(json.dumps(raw, indent=2), encoding="utf-8")
-    load_and_register_vtq3(tables_path)
+    load_and_register_vtq(tables_path)
 
 
 # =================================================================================================
@@ -1273,7 +1273,7 @@ def calibrate_vtq3_distortion_ratios(model_dir: Path, tables_path: Path = DEFAUL
 # =================================================================================================
 
 @torch.no_grad()
-def profile_matrix_vtq3(
+def profile_matrix_vtq(
     slices: list,
     l_idx: int,
     full: str,
@@ -1285,11 +1285,11 @@ def profile_matrix_vtq3(
     rot_block: int = -1,
     rot_mode: str = "outer",
 ):
-    """Profiles per-slice Fisher-weighted distortion under VTQ v3 preconditioning (`suh` + `Outer-DCT` / `FWHT-256`)."""
+    """Profiles per-slice Fisher-weighted distortion under VTQ preconditioning (`suh` + `Outer-DCT` / `FWHT-256`)."""
     dev = W.device
     rw = s_row.to(dev).float() if s_row is not None else None
     rb = resolve_rot_block(full, rot_block=rot_block, rot_mode=rot_mode)
-    W_rot, H_rot, _ = compute_suh_vtq3(W.float(), H.float(), seed=seed, row_weights=rw, rot_block=rb)
+    W_rot, H_rot, _ = compute_suh_vtq(W.float(), H.float(), seed=seed, row_weights=rw, rot_block=rb)
     diag_h = torch.diagonal(H_rot).clamp(min=1e-8)
     diff = W_rot - lv2.quantize_liqk_v2_diag_rot(W_rot, diag_h, "LIQK3_V2")
     row_err = ((diff @ H_rot) * diff).sum(dim=1).clamp(min=1e-12)
@@ -1303,7 +1303,7 @@ def profile_matrix_vtq3(
 
 
 @torch.no_grad()
-def build_vtq3_fisher_slice_profile(
+def build_vtq_fisher_slice_profile(
     model: nn.Module,
     cal_tokens: torch.Tensor,
     candidate_specs: Optional[List[str]] = None,
@@ -1315,11 +1315,11 @@ def build_vtq3_fisher_slice_profile(
     rot_block: int = -1,
     rot_mode: str = "outer",
 ) -> dict:
-    """Builds the VTQ v3 Fisher slice profile with 128-row GQA KV slices and lossless SwiGLU `mlp_perms`."""
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
+    """Builds the VTQ Fisher slice profile with 128-row GQA KV slices and lossless SwiGLU `mlp_perms`."""
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
     if candidate_specs is None:
-        candidate_specs = list(VTQ3_MENU)
+        candidate_specs = list(VTQ_MENU)
 
     device = next(model.parameters()).device
     n_layers = model.config.num_hidden_layers
@@ -1390,7 +1390,7 @@ def build_vtq3_fisher_slice_profile(
                 step = min(kv_slice_rows, M_r)
             else:
                 step = min(attn_slice_rows, M_r)
-            profile_matrix_vtq3(
+            profile_matrix_vtq(
                 slices_info,
                 l_idx,
                 subname,
@@ -1549,7 +1549,7 @@ def polish_model_scales_kld_checkpointed(
 
 
 @torch.no_grad()
-def quantize_llama_model_vtq3(
+def quantize_llama_model_vtq(
     model: nn.Module,
     cal_tokens: torch.Tensor,
     spec_or_assignment: str | Dict[Tuple[int, str], List[Tuple[int, int, str]]],
@@ -1565,10 +1565,10 @@ def quantize_llama_model_vtq3(
     polish_lr: float = 4e-4,
     ref_hidden_cpu: Optional[torch.Tensor] = None,
 ) -> dict:
-    """Layer-by-layer streaming VTQ v3 quantizer with asymmetric `GPTAQ` (`Qwen` QK-Norm safe via `sq._attn`)
+    """Layer-by-layer streaming VTQ quantizer with asymmetric `GPTAQ` (`Qwen` QK-Norm safe via `sq._attn`)
     and optional `O(1)`-layer gradient-checkpointed scale polish."""
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
 
     import src.streaming_quant as sq
 
@@ -1613,7 +1613,7 @@ def quantize_llama_model_vtq3(
             W_tgt = (W + eff_gptaq * (W @ B.T)) if (use_g and B is not None) else None
             sr = fisher_out[(l_idx, full_name)].to(device)
             rb = resolve_rot_block(full_name, rot_block=rot_block, rot_mode=rot_mode)
-            _, w_hat, _ = quantize_matrix_vtq3(
+            _, w_hat, _ = quantize_matrix_vtq(
                 W, H, r_specs, seed=seed_i, damp=damp * dm, row_weights=sr,
                 rot_block=rb, W_target=W_tgt, u_sb_gecd_sweeps=d_sb_gecd_sweeps,
             )
@@ -1712,11 +1712,11 @@ def quantize_llama_model_vtq3(
 
 
 # =================================================================================================
-# 6. `quantize_rings_vtq3` (Embeddings, `lm_head`, Gemma-4 PLE) & `install_vtq3_hooks`
+# 6. `quantize_rings_vtq` (Embeddings, `lm_head`, Gemma-4 PLE) & `install_vtq_hooks`
 # =================================================================================================
 
 @torch.no_grad()
-def quantize_rings_vtq3(
+def quantize_rings_vtq(
     W: torch.Tensor,
     spec_name: str,
     ring_len: int = TILE,
@@ -1724,12 +1724,12 @@ def quantize_rings_vtq3(
     chunk: int = 8192,
     scales: tuple[float, ...] = (0.94, 1.00, 1.07),
 ) -> Tuple[torch.Tensor, float]:
-    """Quantizes 2D table `W [rows, n * ring_len]` (`ring_len <= 256`) using VTQ v3 256-state tail-biting rings."""
-    if not VTQ3_CONFIG:
-        load_and_register_vtq3()
-    assert 0 < ring_len <= TILE, f"VTQ v3 rings require ring_len <= 256, got {ring_len}"
+    """Quantizes 2D table `W [rows, n * ring_len]` (`ring_len <= 256`) using VTQ 256-state tail-biting rings."""
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
+    assert 0 < ring_len <= TILE, f"VTQ rings require ring_len <= 256, got {ring_len}"
     dev = torch.device("cuda")
-    cfg, lut_t, gains_t = _get_spec_gpu_vtq3(spec_name, dev)
+    cfg, lut_t, gains_t = _get_spec_gpu_vtq(spec_name, dev)
     K = int(cfg["K"])
     U = 1 << (K - 1)
     nl = int(cfg["nl"])
@@ -1741,8 +1741,8 @@ def quantize_rings_vtq3(
         if not rot:
             return x
         if not inv:
-            return apply_vtq3_rot(x * signs.unsqueeze(0), rot_block=-1, transpose=False)
-        return apply_vtq3_rot(x, rot_block=-1, transpose=True) * signs.unsqueeze(0)
+            return apply_vtq_rot(x * signs.unsqueeze(0), rot_block=-1, transpose=False)
+        return apply_vtq_rot(x, rot_block=-1, transpose=True) * signs.unsqueeze(0)
 
     rings = W.view(-1, ring_len)
     out = torch.empty_like(rings)
@@ -1788,15 +1788,15 @@ def quantize_rings_vtq3(
     return out.view_as(W), bpv
 
 
-_HOOKS_VTQ3_INSTALLED = False
+_HOOKS_VTQ_INSTALLED = False
 
 
-def install_vtq3_hooks():
-    """Patches `streaming_quant` and `hybrid_quant` so any `VTQ3*` format or `VTQ3` DP assignment
-    automatically executes `quantize_matrix_vtq3` and `profile_matrix_vtq3`."""
-    global _HOOKS_VTQ3_INSTALLED
-    load_and_register_vtq3()
-    if _HOOKS_VTQ3_INSTALLED:
+def install_vtq_hooks():
+    """Patches `streaming_quant` and `hybrid_quant` so any `VTQ*` format or `VTQ` DP assignment
+    automatically executes `quantize_matrix_vtq` and `profile_matrix_vtq`."""
+    global _HOOKS_VTQ_INSTALLED
+    load_and_register_vtq()
+    if _HOOKS_VTQ_INSTALLED:
         return
 
     import src.streaming_quant as sqm
@@ -1805,37 +1805,37 @@ def install_vtq3_hooks():
     orig_prof = sqm.profile_matrix
     orig_dp = lv2.solve_fisher_slice_dp
 
-    def _is_vtq3(spec) -> bool:
+    def _is_vtq(spec) -> bool:
         if isinstance(spec, str):
-            return spec in VTQ3_CONFIG
+            return spec in VTQ_CONFIG
         if isinstance(spec, list) and spec:
-            return spec[0][2] in VTQ3_CONFIG
+            return spec[0][2] in VTQ_CONFIG
         return False
 
     def _patched_quant(W: torch.Tensor, H: torch.Tensor, spec, seed: int, damp: float, full: str | None = None) -> torch.Tensor:
-        if _is_vtq3(spec):
+        if _is_vtq(spec):
             rw = sqm._row_w(full, W.device) if full else None
             vtq_damp = damp * 10.0 if damp < 0.08 else damp
-            rot_mode = os.environ.get("VTQ3_ROT_MODE", "outer")
+            rot_mode = os.environ.get("VTQ_ROT_MODE", "outer")
             rb = resolve_rot_block(full, rot_block=-1, rot_mode=rot_mode)
-            _, w_hat, _ = quantize_matrix_vtq3(W, H, spec, seed=seed, damp=vtq_damp, row_weights=rw, rot_block=rb)
+            _, w_hat, _ = quantize_matrix_vtq(W, H, spec, seed=seed, damp=vtq_damp, row_weights=rw, rot_block=rb)
             return w_hat.to(W.dtype)
         return orig_quant(W, H, spec, seed, damp, full)
 
     def _patched_prof(slices: list, l_idx: int, full: str, W: torch.Tensor, H: torch.Tensor, seed: int, step: int):
-        if os.environ.get("VTQ3_PROFILE", "0") == "1":
+        if os.environ.get("VTQ_PROFILE", "0") == "1":
             s_row = sqm.FISHER[(l_idx, full)].to(W.device).float() if sqm.FISHER is not None else None
-            rot_mode = os.environ.get("VTQ3_ROT_MODE", "outer")
-            return profile_matrix_vtq3(slices, l_idx, full, W, H, seed, step, s_row=s_row, rot_block=-1, rot_mode=rot_mode)
+            rot_mode = os.environ.get("VTQ_ROT_MODE", "outer")
+            return profile_matrix_vtq(slices, l_idx, full, W, H, seed, step, s_row=s_row, rot_block=-1, rot_mode=rot_mode)
         return orig_prof(slices, l_idx, full, W, H, seed, step)
 
     def _patched_dp(profile: dict, target_bpw: float, candidate_specs: Optional[List[str]] = None, sens_power: float = 1.0):
         if candidate_specs is not None:
             s_set = set(candidate_specs)
-            if VTQ3_MENU and s_set == set(VTQ3_MENU):
-                candidate_specs = vtq3_candidates_for_target(target_bpw, VTQ3_MENU)
-            elif VTQ3_CONFIG and s_set.issubset(set(VTQ3_CONFIG.keys())) and len(s_set) >= 10:
-                candidate_specs = vtq3_candidates_for_target(target_bpw, list(candidate_specs))
+            if VTQ_MENU and s_set == set(VTQ_MENU):
+                candidate_specs = vtq_candidates_for_target(target_bpw, VTQ_MENU)
+            elif VTQ_CONFIG and s_set.issubset(set(VTQ_CONFIG.keys())) and len(s_set) >= 10:
+                candidate_specs = vtq_candidates_for_target(target_bpw, list(candidate_specs))
         return orig_dp(profile, target_bpw=target_bpw, candidate_specs=candidate_specs, sens_power=sens_power)
 
     sqm._quantize_linear_weight = _patched_quant
@@ -1848,7 +1848,7 @@ def install_vtq3_hooks():
         hqm.profile_matrix = _patched_prof
     except Exception:
         pass
-    _HOOKS_VTQ3_INSTALLED = True
+    _HOOKS_VTQ_INSTALLED = True
 
 
 if __name__ == "__main__":
@@ -1859,6 +1859,6 @@ if __name__ == "__main__":
     ap.add_argument("--model-dir", type=Path, default=ROOT / "models" / "Llama-3.2-3B-Instruct")
     args = ap.parse_args()
     if args.train_tables:
-        train_vtq3_tables(out_path=args.out, calibrate_model_dir=args.model_dir)
+        train_vtq_tables(out_path=args.out, calibrate_model_dir=args.model_dir)
     elif args.calibrate_only:
-        calibrate_vtq3_distortion_ratios(args.model_dir, tables_path=args.out)
+        calibrate_vtq_distortion_ratios(args.model_dir, tables_path=args.out)

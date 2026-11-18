@@ -1,6 +1,6 @@
 {
-  "VTQ3_150": {
-    "name": "VTQ3_150",
+  "VTQ_150": {
+    "name": "VTQ_150",
     "fmt_code": 15,
     "K": 2,
     "frac": 1,
@@ -63,8 +63,8 @@
     "gap_total_bpw": 0.2336,
     "distortion_ratio": 3.353673
   },
-  "VTQ3_175": {
-    "name": "VTQ3_175",
+  "VTQ_175": {
+    "name": "VTQ_175",
     "fmt_code": 17,
     "K": 2,
     "frac": 2,
@@ -127,8 +127,8 @@
     "gap_total_bpw": 0.1894,
     "distortion_ratio": 2.123575
   },
-  "VTQ3_200": {
-    "name": "VTQ3_200",
+  "VTQ_200": {
+    "name": "VTQ_200",
     "fmt_code": 20,
     "K": 2,
     "frac": 0,
@@ -175,8 +175,8 @@
     "gap_total_bpw": 0.1359,
     "distortion_ratio": 1.346291
   },
-  "VTQ3_225": {
-    "name": "VTQ3_225",
+  "VTQ_225": {
+    "name": "VTQ_225",
     "fmt_code": 22,
     "K": 3,
     "frac": 3,
@@ -239,8 +239,8 @@
     "gap_total_bpw": 0.1421,
     "distortion_ratio": 0.943165
   },
-  "VTQ3_250": {
-    "name": "VTQ3_250",
+  "VTQ_250": {
+    "name": "VTQ_250",
     "fmt_code": 25,
     "K": 3,
     "frac": 1,
@@ -303,8 +303,8 @@
     "gap_total_bpw": 0.1369,
     "distortion_ratio": 0.653757
   },
-  "VTQ3_250_H2": {
-    "name": "VTQ3_250_H2",
+  "VTQ_250_H2": {
+    "name": "VTQ_250_H2",
     "fmt_code": 24,
     "K": 3,
     "frac": 1,
@@ -371,8 +371,8 @@
     "gap_total_bpw": 0.1441,
     "distortion_ratio": 0.604261
   },
-  "VTQ3_275": {
-    "name": "VTQ3_275",
+  "VTQ_275": {
+    "name": "VTQ_275",
     "fmt_code": 26,
     "K": 3,
     "frac": 2,
@@ -435,8 +435,8 @@
     "gap_total_bpw": 0.1485,
     "distortion_ratio": 0.466473
   },
-  "VTQ3_275_H2": {
-    "name": "VTQ3_275_H2",
+  "VTQ_275_H2": {
+    "name": "VTQ_275_H2",
     "fmt_code": 27,
     "K": 3,
     "frac": 2,
@@ -503,8 +503,8 @@
     "gap_total_bpw": 0.1491,
     "distortion_ratio": 0.427611
   },
-  "VTQ3_300_FAST": {
-    "name": "VTQ3_300_FAST",
+  "VTQ_300_FAST": {
+    "name": "VTQ_300_FAST",
     "fmt_code": 30,
     "K": 3,
     "frac": 0,
@@ -555,8 +555,8 @@
     "gap_total_bpw": 0.1509,
     "distortion_ratio": 0.301353
   },
-  "VTQ3_300": {
-    "name": "VTQ3_300",
+  "VTQ_300": {
+    "name": "VTQ_300",
     "fmt_code": 31,
     "K": 3,
     "frac": 0,
@@ -623,8 +623,8 @@
     "gap_total_bpw": 0.1366,
     "distortion_ratio": 0.295426
   },
-  "VTQ3_325": {
-    "name": "VTQ3_325",
+  "VTQ_325": {
+    "name": "VTQ_325",
     "fmt_code": 32,
     "K": 4,
     "frac": 3,
@@ -693,8 +693,8 @@
     "gap_total_bpw": 0.1525,
     "distortion_ratio": 0.21255
   },
-  "VTQ3_350": {
-    "name": "VTQ3_350",
+  "VTQ_350": {
+    "name": "VTQ_350",
     "fmt_code": 35,
     "K": 4,
     "frac": 1,
@@ -763,8 +763,8 @@
     "gap_total_bpw": 0.1414,
     "distortion_ratio": 0.147621
   },
-  "VTQ3_375": {
-    "name": "VTQ3_375",
+  "VTQ_375": {
+    "name": "VTQ_375",
     "fmt_code": 37,
     "K": 4,
     "frac": 2,
@@ -833,8 +833,8 @@
     "gap_total_bpw": 0.1517,
     "distortion_ratio": 0.10577
   },
-  "VTQ3_400": {
-    "name": "VTQ3_400",
+  "VTQ_400": {
+    "name": "VTQ_400",
     "fmt_code": 40,
     "K": 4,
     "frac": 0,
@@ -911,8 +911,8 @@
     "gap_total_bpw": 0.1674,
     "distortion_ratio": 0.070087
   },
-  "VTQ3_425": {
-    "name": "VTQ3_425",
+  "VTQ_425": {
+    "name": "VTQ_425",
     "fmt_code": 42,
     "K": 5,
     "frac": 3,
@@ -1013,8 +1013,8 @@
     "gap_total_bpw": 0.146,
     "distortion_ratio": 0.052401
   },
-  "VTQ3_450": {
-    "name": "VTQ3_450",
+  "VTQ_450": {
+    "name": "VTQ_450",
     "fmt_code": 45,
     "K": 5,
     "frac": 1,
@@ -1115,8 +1115,8 @@
     "gap_total_bpw": 0.1407,
     "distortion_ratio": 0.03679
   },
-  "VTQ3_475": {
-    "name": "VTQ3_475",
+  "VTQ_475": {
+    "name": "VTQ_475",
     "fmt_code": 47,
     "K": 5,
     "frac": 2,
@@ -1217,8 +1217,8 @@
     "gap_total_bpw": 0.1508,
     "distortion_ratio": 0.026419
   },
-  "VTQ3_500_FAST": {
-    "name": "VTQ3_500_FAST",
+  "VTQ_500_FAST": {
+    "name": "VTQ_500_FAST",
     "fmt_code": 50,
     "K": 5,
     "frac": 0,
@@ -1293,8 +1293,8 @@
     "gap_total_bpw": 0.2055,
     "distortion_ratio": 0.018446
   },
-  "VTQ3_500": {
-    "name": "VTQ3_500",
+  "VTQ_500": {
+    "name": "VTQ_500",
     "fmt_code": 51,
     "K": 5,
     "frac": 0,
@@ -1403,8 +1403,8 @@
     "gap_total_bpw": 0.1646,
     "distortion_ratio": 0.017466
   },
-  "VTQ3_550": {
-    "name": "VTQ3_550",
+  "VTQ_550": {
+    "name": "VTQ_550",
     "fmt_code": 55,
     "K": 6,
     "frac": 1,
@@ -1513,8 +1513,8 @@
     "gap_total_bpw": 0.1707,
     "distortion_ratio": 0.008805
   },
-  "VTQ3_575": {
-    "name": "VTQ3_575",
+  "VTQ_575": {
+    "name": "VTQ_575",
     "fmt_code": 57,
     "K": 6,
     "frac": 2,
@@ -1623,8 +1623,8 @@
     "gap_total_bpw": 0.1771,
     "distortion_ratio": 0.006288
   },
-  "VTQ3_600": {
-    "name": "VTQ3_600",
+  "VTQ_600": {
+    "name": "VTQ_600",
     "fmt_code": 60,
     "K": 6,
     "frac": 0,

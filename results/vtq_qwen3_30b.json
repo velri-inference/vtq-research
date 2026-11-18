@@ -3,9 +3,9 @@
   "n_layers": 48,
   "load_sec_total": 5.920687388999227,
   "methods": {
-    "dp:VTQ3:3.0": {
+    "dp:VTQ:3.0": {
       "kind": "dp",
-      "arg": "VTQ3:3.0",
+      "arg": "VTQ:3.0",
       "quant_sec": 635.3302457999979,
       "linear_bpw": 3.0,
       "nemotron": {
@@ -323,9 +323,9 @@
         ]
       }
     },
-    "dp:VTQ3:3.5": {
+    "dp:VTQ:3.5": {
       "kind": "dp",
-      "arg": "VTQ3:3.5",
+      "arg": "VTQ:3.5",
       "quant_sec": 596.1893988769988,
       "linear_bpw": 3.499998903970258,
       "nemotron": {
@@ -643,9 +643,9 @@
         ]
       }
     },
-    "dp:VTQ3:4.5": {
+    "dp:VTQ:4.5": {
       "kind": "dp",
-      "arg": "VTQ3:4.5",
+      "arg": "VTQ:4.5",
       "quant_sec": 635.4383267229983,
       "linear_bpw": 4.499998903970258,
       "nemotron": {
@@ -2886,7 +2886,7 @@
   },
   "wall_sec": 2147.469343897,
   "comparisons": {
-    "dp:VTQ3:3.0 vs dp:VTQ2:3.0": {
+    "dp:VTQ:3.0 vs dp:VTQ2:3.0": {
       "nemotron": {
         "mean_diff": 0.0009626867956820939,
         "ci95_lo": -0.00033010817172555984,
@@ -2902,7 +2902,7 @@
         "rel_pct": 3.14
       }
     },
-    "dp:VTQ3:3.0 vs dp:TCQPQ:3.0": {
+    "dp:VTQ:3.0 vs dp:TCQPQ:3.0": {
       "nemotron": {
         "mean_diff": 0.0013449101716609263,
         "ci95_lo": -0.0002022274024204844,
@@ -2918,7 +2918,7 @@
         "rel_pct": 6.89
       }
     },
-    "dp:VTQ3:3.0 vs exl3:exl3_out/qwen3_30b_3.0": {
+    "dp:VTQ:3.0 vs exl3:exl3_out/qwen3_30b_3.0": {
       "nemotron": {
         "mean_diff": -0.023008282568152138,
         "ci95_lo": -0.025886262443050794,
@@ -2934,7 +2934,7 @@
         "rel_pct": -47.15
       }
     },
-    "dp:VTQ3:4.5 vs dp:VTQ2:4.5": {
+    "dp:VTQ:4.5 vs dp:VTQ2:4.5": {
       "nemotron": {
         "mean_diff": 0.00012140099618737545,
         "ci95_lo": -0.0002205829280819094,
@@ -2950,7 +2950,7 @@
         "rel_pct": 4.07
       }
     },
-    "dp:VTQ3:4.5 vs dp:TCQPQ:4.5": {
+    "dp:VTQ:4.5 vs dp:TCQPQ:4.5": {
       "nemotron": {
         "mean_diff": -0.0004346545318874885,
         "ci95_lo": -0.0008077956112131881,
@@ -2966,7 +2966,7 @@
         "rel_pct": -8.4
       }
     },
-    "dp:VTQ3:4.5 vs exl3:exl3_out/qwen3_30b_4.5": {
+    "dp:VTQ:4.5 vs exl3:exl3_out/qwen3_30b_4.5": {
       "nemotron": {
         "mean_diff": -0.0015368661993566913,
         "ci95_lo": -0.0019726864855570013,

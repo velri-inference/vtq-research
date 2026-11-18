@@ -3654,7 +3654,7 @@
         ]
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-3.0000": {
+    "VTQ-NoGPTAQ-NeuCal-3.0000": {
       "info": {
         "linear_bpw": 3.0,
         "quant_sec": 91.76822793199995
@@ -4263,7 +4263,7 @@
         ]
       }
     },
-    "VTQ3-NeuCal-3.0000": {
+    "VTQ-NeuCal-3.0000": {
       "info": {
         "linear_bpw": 3.0,
         "quant_sec": 110.07426777199998
@@ -4872,7 +4872,7 @@
         ]
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-4.0000": {
+    "VTQ-NoGPTAQ-NeuCal-4.0000": {
       "info": {
         "linear_bpw": 3.9999796549479165,
         "quant_sec": 133.69484301099988
@@ -5481,7 +5481,7 @@
         ]
       }
     },
-    "VTQ3-NeuCal-4.0000": {
+    "VTQ-NeuCal-4.0000": {
       "info": {
         "linear_bpw": 3.9999796549479165,
         "quant_sec": 152.04879485399988
@@ -6092,7 +6092,7 @@
     }
   },
   "comparisons": {
-    "VTQ3-NeuCal-3.0000 vs VTQ2-NeuCal-3.0000": {
+    "VTQ-NeuCal-3.0000 vs VTQ2-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.002824424820269969,
         "ci95_lo": 0.0006287603797273831,
@@ -6115,7 +6115,7 @@
         "rel_pct": 3.46
       }
     },
-    "VTQ3-NeuCal-3.0000 vs VTQ2-NoGPTAQ-NeuCal-3.0000": {
+    "VTQ-NeuCal-3.0000 vs VTQ2-NoGPTAQ-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.0011999864057390675,
         "ci95_lo": -0.0008400828322653502,
@@ -6138,7 +6138,7 @@
         "rel_pct": -13.35
       }
     },
-    "VTQ3-NeuCal-3.0000 vs TCQPQ-NeuCal-3.0000": {
+    "VTQ-NeuCal-3.0000 vs TCQPQ-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.0009110752759421067,
         "ci95_lo": -0.0014354726353862665,
@@ -6161,7 +6161,7 @@
         "rel_pct": -13.53
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-3.0000 vs VTQ2-NeuCal-3.0000": {
+    "VTQ-NoGPTAQ-NeuCal-3.0000 vs VTQ2-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.0027633819305565785,
         "ci95_lo": 0.0011960971054213363,
@@ -6184,7 +6184,7 @@
         "rel_pct": 18.4
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-3.0000 vs VTQ2-NoGPTAQ-NeuCal-3.0000": {
+    "VTQ-NoGPTAQ-NeuCal-3.0000 vs VTQ2-NoGPTAQ-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.001138943516025677,
         "ci95_lo": -0.0006156673339408074,
@@ -6207,7 +6207,7 @@
         "rel_pct": -0.83
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-3.0000 vs TCQPQ-NeuCal-3.0000": {
+    "VTQ-NoGPTAQ-NeuCal-3.0000 vs TCQPQ-NeuCal-3.0000": {
       "nemotron": {
         "mean_diff": 0.0008500323862287162,
         "ci95_lo": -0.0011213323089007804,
@@ -6230,7 +6230,7 @@
         "rel_pct": -1.04
       }
     },
-    "VTQ3-NeuCal-4.0000 vs VTQ2-NeuCal-4.0000": {
+    "VTQ-NeuCal-4.0000 vs VTQ2-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": 9.616804996139677e-06,
         "ci95_lo": -0.0005478874168036735,
@@ -6253,7 +6253,7 @@
         "rel_pct": 2.15
       }
     },
-    "VTQ3-NeuCal-4.0000 vs VTQ2-NoGPTAQ-NeuCal-4.0000": {
+    "VTQ-NeuCal-4.0000 vs VTQ2-NoGPTAQ-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": -0.0002942532244932707,
         "ci95_lo": -0.0010851408725766904,
@@ -6276,7 +6276,7 @@
         "rel_pct": -12.65
       }
     },
-    "VTQ3-NeuCal-4.0000 vs TCQPQ-NeuCal-4.0000": {
+    "VTQ-NeuCal-4.0000 vs TCQPQ-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": -0.0009447786440674403,
         "ci95_lo": -0.0015204971306550243,
@@ -6299,7 +6299,7 @@
         "rel_pct": -14.97
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-4.0000 vs VTQ2-NeuCal-4.0000": {
+    "VTQ-NoGPTAQ-NeuCal-4.0000 vs VTQ2-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": 0.0008212766421480753,
         "ci95_lo": 0.0003459169356384596,
@@ -6322,7 +6322,7 @@
         "rel_pct": 19.9
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-4.0000 vs VTQ2-NoGPTAQ-NeuCal-4.0000": {
+    "VTQ-NoGPTAQ-NeuCal-4.0000 vs VTQ2-NoGPTAQ-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": 0.0005174066126586649,
         "ci95_lo": 6.827491222813178e-05,
@@ -6345,7 +6345,7 @@
         "rel_pct": 2.53
       }
     },
-    "VTQ3-NoGPTAQ-NeuCal-4.0000 vs TCQPQ-NeuCal-4.0000": {
+    "VTQ-NoGPTAQ-NeuCal-4.0000 vs TCQPQ-NeuCal-4.0000": {
       "nemotron": {
         "mean_diff": -0.00013311880691550468,
         "ci95_lo": -0.0005505151402446421,
