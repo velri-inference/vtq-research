@@ -1,10 +1,12 @@
-# vtq-research
+# VTQ — Velri Trellis Quant
 
-The research that LTQ (*Lumen Trellis Quant*) grew out of — the weight quantization format of the [Velri](https://github.com/lumen-inference/velri) engine: Python and CUDA quantizer prototypes, comparison rigs against EXL3 and GGUF, raw results. The [format specification](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-format.md), [rationale and summary tables](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-design.md) live in Velri. Model files use `.vtq`; the LTQ v1 byte layout and internal tensor keys remain unchanged.
+The **[vtq branch](https://github.com/velri-inference/vtq-research/tree/vtq)** contains the current `16×256` trellis weight format, its quantizer and its `.vtq` reader/writer. Start with the [VTQ specification](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/vtq-format.md), [eight-model benchmark results](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/universal-gate.md), or [native loader for KLD evaluation](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/vtq-native-io.md). To use that code after cloning, run `git switch vtq`.
+
+This `main` branch preserves the earlier LTQ (*Lumen Trellis Quant*) experiments. The milestones, source paths and commands below refer to that prototype, not the current VTQ layout.
 
 The metric is the same everywhere: mean KL divergence from BF16 with teacher-forced tokens on two traces that take no part in calibration — English Nemotron dialogues (`nem`) and a multilingual ru / zh / de / fr / es trace (`mul`); differences are computed with a paired bootstrap over dialogues.
 
-## How the format was derived
+## History: GGUF experiments through the LTQ prototype
 
 Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level tables ≤ 32 entries — `pshufb`), an operation count per 256 weights on par with GGUF, quantization noticeably faster than EXL3 conversion, and quality no worse than EXL3 at the same bitrate.
 
@@ -24,12 +26,12 @@ Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level
 8. **Reproducibility.** Fisher sampled tokens randomly, and DP assignments drifted by ±5 % KLD between processes; sampling via the inverse CDF with fixed numbers brought it down to 1–2 %. Without Fisher weights the same menu is twice as bad.
 9. **Final TCQPQ menu** — 19 formats, K = 2…5, integer, D2 and D4, 2.04–5.29 bits/weight. Against EXL3 at the same bitrate: Qwen3-8B −10…−31 %, Qwen3-30B-A3B −52 % at 3.0 (attention gets 4.4 bits at the cost of 0.05 bits on experts), Qwen3.5-4B and Gemma 4 E4B −14…−26 % (against per-matrix EXL3, since the stock converter does not support them). Rejected after testing: K + 0.25, median-based winsorization (+38…+55 % KLD), a single-iteration DP profile.
 10. **Row tables** (embeddings, n-grams, PLE) — rings of the same trellis with Hadamard rotation: Gemma 4 E4B PLE at 4.25 bits — KLD 0.0010 at 1.39 GiB versus 0.0006 for int8 at 2.65 GiB.
-11. **The format is frozen** by the specification and the reference `src/ltq_format.py`: a self-test of 19 tile formats and 17 ring formats — 0 mismatches with the quantizer (`results/ltq_format_selftest.json`).
+11. **The LTQ prototype layout was frozen** by the specification and the reference `src/ltq_format.py`: a self-test of 19 tile formats and 17 ring formats — 0 mismatches with the quantizer (`results/ltq_format_selftest.json`).
 12. **Check against third-party quants** (Qwen3.8-27B, `results/q27_report.txt`): at the same bitrate of the decoder linear layers, −46…−49 % KLD vs GSQ-RCO (GGUF, IQ3_XXS / IQ3_S) and −32…−33 % vs EXL3 3.5; against self-calibrated EXL3 3.0 — within noise.
 
 Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration, chat and agents) is closer in domain to the evaluation traces than the competitors' calibration; a check with neutral calibration and an external trace has not been done yet.
 
-## What's where
+## Historical code on `main`
 
 | Path | Contents |
 | --- | --- |
@@ -42,7 +44,7 @@ Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration,
 | `src/cpu/`, `src/cuda/ltq_matvec_bench.cu`, `src/kbench/` | decode speed on CPU and GPU; CUDA C++ vs cuda-oxide |
 | `results/` | raw results (JSON) and summaries |
 
-## Running
+## Reproducing the historical experiments
 
 Python with torch (CUDA) and transformers; the CUDA Viterbi needs `nvcc` in `/usr/local/cuda/bin` (built on first call). EXL3 comparisons need exllamav3 1.6.x (`LUMEN_EXL3_PYTHON`, `LUMEN_EXL3_CONVERT`), GGUF comparisons need a built `libggml-base.so` (`LUMEN_LIBGGML`). Paths to local models and third-party builds default to `~/lm-inference`.
 
