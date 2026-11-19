@@ -497,8 +497,9 @@ def decode_supertiles_vtq(
     K: int,
     fmt: VtqFormat,
     d_row: np.ndarray | None = None,
+    *, gain_luts: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Vectorized reference decoder from `vtq_st16_k*_t` bytes to `float32 [M, K]` (natural column order)."""
+    """Vectorized reference decoder; gain_luts is for the separate TSB1 research container only."""
     assert K % TILE == 0
     M_pad = _align(M, SUPER_ROWS)
     nbg, nsb = M_pad // SUPER_ROWS, K // TILE
@@ -545,9 +546,6 @@ def decode_supertiles_vtq(
         u0, _ = _unpack_lsb16(buf, off, fmt.gosset, nbg, nsb)
         u_grj |= u0
 
-    lut_2d = fmt.lut.reshape(fmt.nl, fmt.U)
-    vals = lut_2d[lb_grj, u_grj]  # [nbg, nsb, 16_g, 16_r, 16_j]
-
     hdr_off = fmt.st_bytes - 16 - fmt.h * 32
     hdr_u16 = np.frombuffer(np.ascontiguousarray(buf[:, :, hdr_off : fmt.st_bytes - 16]), dtype="<u2").reshape(nbg, nsb, 16, fmt.h)
     sh16 = np.arange(16, dtype=np.uint16)[None, None, None, :]
@@ -556,6 +554,12 @@ def decode_supertiles_vtq(
         g_idx |= (((hdr_u16[:, :, :, hb, None] >> sh16) & 1).astype(np.int32)) << hb
 
     u_sb_f = buf[:, :, -16:].astype(np.float32) * U_SB_UNIT  # [nbg, nsb, 16_r]
+    if gain_luts is None:
+        vals = fmt.lut.reshape(fmt.nl, fmt.U)[lb_grj, u_grj]
+    else:
+        if gain_luts.shape != (1 << fmt.h, fmt.nl, fmt.U):
+            raise ValueError("invalid gain-conditioned lookup table shape")
+        vals = gain_luts[g_idx[..., None], lb_grj, u_grj]
     w_grj = vals * fmt.gain_tab[g_idx][..., None] * u_sb_f[:, :, None, :, None]
     W_pad = w_grj.transpose(0, 3, 1, 2, 4).reshape(M_pad, K).astype(np.float32)
     W_out = W_pad[:M]
@@ -585,7 +589,9 @@ def assemble_vtq(
 # ------------------------------------------------------------------------------------------------
 
 class VtqWriter:
-    def __init__(self, path: Path, formats: list[VtqFormat], reserve: int = (4 << 20) - 16):
+    def __init__(self, path: Path, formats: list[VtqFormat], reserve: int = (4 << 20) - 16, *, codec=None):
+        # The caller (never checkpoint metadata) may supply an explicit CPU codec.
+        self._pack_tiles = pack_supertiles_vtq if codec is None else codec.pack
         self.f = open(path, "w+b")
         self.reserve = _align(16 + reserve, 64) - 16
         self.data_off = 16 + self.reserve
@@ -629,7 +635,7 @@ class VtqWriter:
         for r0, r1, name in m["row_slices"]:
             fi = self.fmt_idx[name]
             fmt = self.formats[fi]
-            b = pack_supertiles_vtq(c_np[r0:r1], u_np[r0:r1], g_np[r0:r1], usb_np[r0:r1], fmt).tobytes()
+            b = self._pack_tiles(c_np[r0:r1], u_np[r0:r1], g_np[r0:r1], usb_np[r0:r1], fmt).tobytes()
             pad = (-len(b)) & 63
             blobs.append(b + b"\0" * pad)
             meta.append([r0, r1, fi, off, rot_block])
@@ -655,8 +661,10 @@ class VtqWriter:
 
 
 class VtqFile:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, codec=None):
         import mmap
+
+        self._unpack_tiles = decode_supertiles_vtq if codec is None else codec.unpack
 
         self.f = open(path, "rb")
         self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
@@ -664,8 +672,19 @@ class VtqFile:
         assert magic == MAGIC and ver in (VERSION, 3), f"not a .vtq file: {magic!r} v{ver}"
         self.header = json.loads(bytes(self.mm[16 : 16 + hlen]))
         self.formats = [format_from_json_vtq(d) for d in self.header["quantization"]["formats"]]
+        # VtqWriter pads the header with spaces but the tensor payload can
+        # itself begin with 0x20 (a perfectly valid packed trellis byte).
+        # Its final tensor ends at EOF, so scan no further than the last
+        # possible aligned start that still fits all declared tensor bytes.
+        extent = max((t["offset"] + math.prod(t["shape"]) * np.dtype(DTYPES[t["dtype"]][0]).itemsize
+                      for t in self.header["tensors"].values()), default=0)
+        last_start = (len(self.mm) - extent) // 64 * 64
         end = 16 + hlen
-        while end < len(self.mm) and self.mm[end] == 0x20:
+        if _align(end, 64) > last_start:
+            self.mm.close()
+            self.f.close()
+            raise ValueError("truncated VTQ tensor payload")
+        while end < last_start and self.mm[end] == 0x20:
             end += 1
         self.data_off = _align(end, 64)
 
@@ -695,7 +714,7 @@ class VtqFile:
             fmt = self.formats[fi]
             nbg = _align(r1 - r0, SUPER_ROWS) // SUPER_ROWS
             nbytes = nbg * (K // TILE) * fmt.st_bytes
-            dec_np = decode_supertiles_vtq(data[off : off + nbytes], r1 - r0, K, fmt, d_row=d_row[r0:r1])
+            dec_np = self._unpack_tiles(data[off : off + nbytes], r1 - r0, K, fmt, d_row=d_row[r0:r1])
             W_rot[r0:r1] = torch.from_numpy(dec_np).to(device)
         return apply_vtq_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
 

@@ -1,0 +1,33 @@
+{
+  "family": "qwen35",
+  "spec": "VTQ_300",
+  "backend": "native",
+  "stream_unchanged": false,
+  "overlap_unchanged": true,
+  "source_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+  "seed_offset": 13000,
+  "cal_shape": [
+    16,
+    512
+  ],
+  "matrices": 200,
+  "source_keys": 738,
+  "replaced_source_keys": 200,
+  "unchanged_tensors": 538,
+  "unchanged_tensor_bytes": 2189421056,
+  "file_bytes": 3616586752,
+  "sha256": "6672359a990cc63259c35f97cf7a6a4454e8e5d7e8512f143584e533a32ffb17",
+  "matrix_writer_s": 1.3645926130266162,
+  "quant_plus_matrix_writes_s": 28.154576125998574,
+  "complete_export_fsync_s": 29.422225802001776,
+  "peak_extra_cuda_bytes": 3529883648,
+  "rss_before": {
+    "VmHWM": 1786744832,
+    "VmRSS": 1786744832
+  },
+  "rss_after": {
+    "VmHWM": 2333945856,
+    "VmRSS": 2331152384
+  },
+  "peak_extra_rss": 547201024
+}

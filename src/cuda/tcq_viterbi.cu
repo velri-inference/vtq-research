@@ -18,6 +18,17 @@
 #define MAX_SUBS 32  // sub-blocks per tile
 #define MAX_T 512    // samples per tile (traceback keeps the path in local memory)
 
+// Research-only binary (-DVTQ_GAIN_SHAPES): a group header chooses a distinct
+// trellis constellation, not merely a multiplier. The normal library always
+// compiles these offsets out and retains the original table ABI and format.
+#ifdef VTQ_GAIN_SHAPES
+#define VQ_BANKS(gfull) (gfull)
+#define VQ_OFFSET(gi, nl, u) ((gi) * (nl) * (u))
+#else
+#define VQ_BANKS(gfull) 1
+#define VQ_OFFSET(gi, nl, u) 0
+#endif
+
 struct TcqArgs {
     const float* x;         // [N, T]
     const float* w;         // [N, T]
@@ -135,7 +146,7 @@ __global__ void __launch_bounds__(BLOCK) tcq_forward_kernel(const TcqArgs a)
         s_x[i] = a.x[j];
         s_w[i] = a.w[j];
     }
-    for (int i = tid; i < NL * U; i += BLOCK) s_tab[i] = a.tab[i];
+    for (int i = tid; i < VQ_BANKS(a.Gfull) * NL * U; i += BLOCK) s_tab[i] = a.tab[i];
     for (int i = tid; i < NL * U_hi; i += BLOCK) s_tab_hi[i] = a.tab_hi[i];
     if (tid < a.Gfull) { s_gain[tid] = a.gains[tid]; s_gain_hi[tid] = a.gains_hi[tid]; }
 
@@ -207,7 +218,7 @@ __global__ void __launch_bounds__(BLOCK) tcq_forward_kernel(const TcqArgs a)
             float e;
             if (MD) e = branch_err_par(s_x[t], s_gain[gi], s_tab + lb * U, U, p);
             else e = hi ? branch_err(s_x[t], s_gain_hi[gi], s_tab_hi + lb * U_hi, U_hi)
-                        : branch_err(s_x[t], s_gain[gi], s_tab + lb * U, U);
+                        : branch_err(s_x[t], s_gain[gi], s_tab + VQ_OFFSET(gi, NL, U) + lb * U, U);
             s_err[i] = e * s_w[t];
         }
         __syncthreads();
@@ -667,7 +678,7 @@ __global__ void __launch_bounds__(BLOCK) tcq_forward_kernel(const TcqArgs a)
         const int Ut = hi ? U_hi : U;
         const int gi = cand ? (int)s_gc[(t / sub) * G + gg] : gg;
         const float gt = hi ? s_gain_hi[gi] : s_gain[gi];
-        const float* tt = (hi ? s_tab_hi : s_tab) + lb * Ut;
+        const float* tt = (hi ? s_tab_hi : s_tab + VQ_OFFSET(gi, NL, U)) + lb * Ut;
         const float xt = s_x[t];
         float bestd = 3.4e38f, val = 0.f;
         int bu = 0;
@@ -1144,6 +1155,9 @@ extern "C" int tcq_viterbi(
     const int* init_st, int* end_st, const float* tab_hi, const float* gains_hi, uint8_t* gcand, int* best, int* code, int* mid_st, int mid_t, int tail,
     int N, int T, int S, int U, int G, int Gfull, int m, int sub, int U_hi, int mix, int m2, int m3, int m4, int nl, int ld, int rot, uint32_t* pbits, int pp, void* stream)
 {
+#ifdef VTQ_GAIN_SHAPES
+    if (G != 4 || Gfull != G || gcand || mix || pp || nl != 16 || S != 1024 || U != 4) return -1;
+#endif
     if (G > MAX_G || Gfull > MAX_G || (!gcand && Gfull != G) || U > MAX_U || U_hi > MAX_U || T % sub != 0 || (sub & 1) || T / sub > MAX_SUBS || T > MAX_T || sub > 32 ||
         sub * G * nl * (pp ? 2 : 1) > 4096 || (pp && (S != 1024 || mix > 0 || (T & 1))) || (pp >= 2 && ((T & 3) || (sub & 3))) ||
         (pp == 4 && ((T & 7) || (sub & 7) || G > 4)) || pp > 4 || (nl != 4 && nl != 8 && nl != 16 && nl != 32) || ld < T ||

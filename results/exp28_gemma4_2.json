@@ -1,0 +1,72 @@
+{
+  "family": "gemma4",
+  "order": [
+    "native",
+    "numpy"
+  ],
+  "runs": {
+    "native": {
+      "family": "gemma4",
+      "spec": "VTQ_300",
+      "backend": "native",
+      "source_revision": "4e22d7e59e078e63a14f351efdc5232ed366b621",
+      "seed_offset": 13000,
+      "cal_shape": [
+        16,
+        512
+      ],
+      "matrices": 342,
+      "source_keys": 2130,
+      "replaced_source_keys": 342,
+      "unchanged_tensors": 1788,
+      "unchanged_tensor_bytes": 8101780436,
+      "file_bytes": 9680004160,
+      "sha256": "40f0c62f1b1dbdeea77a06f6e8091b4104dc9ede35b87af7cd704c423c1747d7",
+      "matrix_writer_s": 1.5804536639916478,
+      "quant_plus_matrix_writes_s": 34.57778106800106,
+      "complete_export_fsync_s": 62.4290833490013,
+      "peak_extra_cuda_bytes": 4092044288,
+      "rss_before": {
+        "VmHWM": 1801555968,
+        "VmRSS": 1801555968
+      },
+      "rss_after": {
+        "VmHWM": 10318553088,
+        "VmRSS": 10318553088
+      },
+      "peak_extra_rss": 8516997120
+    },
+    "numpy": {
+      "family": "gemma4",
+      "spec": "VTQ_300",
+      "backend": "numpy",
+      "source_revision": "4e22d7e59e078e63a14f351efdc5232ed366b621",
+      "seed_offset": 13000,
+      "cal_shape": [
+        16,
+        512
+      ],
+      "matrices": 342,
+      "source_keys": 2130,
+      "replaced_source_keys": 342,
+      "unchanged_tensors": 1788,
+      "unchanged_tensor_bytes": 8101780436,
+      "file_bytes": 9680004160,
+      "sha256": "40f0c62f1b1dbdeea77a06f6e8091b4104dc9ede35b87af7cd704c423c1747d7",
+      "matrix_writer_s": 7.394279667012597,
+      "quant_plus_matrix_writes_s": 40.646567468000285,
+      "complete_export_fsync_s": 65.24575756900231,
+      "peak_extra_cuda_bytes": 4092044288,
+      "rss_before": {
+        "VmHWM": 1806135296,
+        "VmRSS": 1806135296
+      },
+      "rss_after": {
+        "VmHWM": 10301034496,
+        "VmRSS": 10301034496
+      },
+      "peak_extra_rss": 8494899200
+    }
+  },
+  "all_file_bytes_equal": true
+}

@@ -1,0 +1,176 @@
+{
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "spec": "VTQ_300",
+  "pack": true,
+  "seed": 42,
+  "cases": [
+    {
+      "shape": [
+        768,
+        3072
+      ],
+      "runs": [
+        {
+          "encoder": "src.vtq",
+          "s": 0.050990921999982675,
+          "peak_extra_bytes": 145664000,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.05133849300000293,
+          "peak_extra_bytes": 160493568,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.05131525300021167,
+          "peak_extra_bytes": 160493568,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.05093422299978556,
+          "peak_extra_bytes": 145664000,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.05092018300001655,
+          "peak_extra_bytes": 145664000,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.05128129299964712,
+          "peak_extra_bytes": 160493568,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.051342863000172656,
+          "peak_extra_bytes": 160493568,
+          "rel_loss": 0.003501235869835082
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.05094553300023108,
+          "peak_extra_bytes": 145664000,
+          "rel_loss": 0.003501235869835082
+        }
+      ]
+    },
+    {
+      "shape": [
+        8192,
+        3072
+      ],
+      "runs": [
+        {
+          "encoder": "src.vtq",
+          "s": 0.13331232500013357,
+          "peak_extra_bytes": 1138970112,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.13637368499985314,
+          "peak_extra_bytes": 1370361344,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.13627176399995733,
+          "peak_extra_bytes": 1370361344,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.13305139599970062,
+          "peak_extra_bytes": 1138970112,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.13325545599991528,
+          "peak_extra_bytes": 1138970112,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.1364613539999482,
+          "peak_extra_bytes": 1370361344,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.13617644499981907,
+          "peak_extra_bytes": 1370361344,
+          "rel_loss": 0.0035256037382712232
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.13348733600014384,
+          "peak_extra_bytes": 1138970112,
+          "rel_loss": 0.0035256037382712232
+        }
+      ]
+    },
+    {
+      "shape": [
+        3072,
+        8192
+      ],
+      "runs": [
+        {
+          "encoder": "src.vtq",
+          "s": 0.27664103799997974,
+          "peak_extra_bytes": 1274127872,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.2830481660002988,
+          "peak_extra_bytes": 1404804608,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.28350548600019465,
+          "peak_extra_bytes": 1404804608,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.2767824479997216,
+          "peak_extra_bytes": 1274127872,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.2773007669998151,
+          "peak_extra_bytes": 1274127872,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.283371175999946,
+          "peak_extra_bytes": 1404804608,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq_baseline",
+          "s": 0.28363324600013584,
+          "peak_extra_bytes": 1404804608,
+          "rel_loss": 0.001359337534025381
+        },
+        {
+          "encoder": "src.vtq",
+          "s": 0.27666251799973907,
+          "peak_extra_bytes": 1274127872,
+          "rel_loss": 0.001359337534025381
+        }
+      ]
+    }
+  ]
+}

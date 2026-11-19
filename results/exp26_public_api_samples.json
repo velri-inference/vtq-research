@@ -1,0 +1,402 @@
+{
+  "llama1": {
+    "shape": [
+      8192,
+      2048
+    ],
+    "bytes": 6643840,
+    "sha256_fp32": "27262daa8f366b4dd554000f710b32bb9a94550efaebfc58c2fbd60500b4ef24",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.5483073930008686,
+          "native": 0.03776442800153745
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.03619488700496731,
+          "numpy": 0.2871638689975953
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.29630986700067297,
+          "native": 0.03730542700213846
+        }
+      }
+    ]
+  },
+  "llama3": {
+    "shape": [
+      8192,
+      3072
+    ],
+    "bytes": 9955456,
+    "sha256_fp32": "c15dad840815bdf855b5704890cc744df984380dfd814fb17b31ba4cf47ee84b",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.9116157719981857,
+          "native": 0.056052955995255616
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.05444754600466695,
+          "numpy": 0.42957690700131934
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.4050275500048883,
+          "native": 0.05496759499510517
+        }
+      }
+    ]
+  },
+  "llama8": {
+    "shape": [
+      14336,
+      4096
+    ],
+    "bytes": 23208064,
+    "sha256_fp32": "657cb1d2be9480ba08b6cdca0a24238c2fba0dcd63ddb415fe56e7ec3fe13b55",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.8431176010053605,
+          "native": 0.1238641509989975
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.12350841000443324,
+          "numpy": 1.1447482639996451
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.0727645389997633,
+          "native": 0.12327276099676965
+        }
+      }
+    ]
+  },
+  "qwen8": {
+    "shape": [
+      12288,
+      4096
+    ],
+    "bytes": 19894400,
+    "sha256_fp32": "0579b85d4ba24cbccebd7d7ca4cb11d165e96a6386e3926d84375f68ce09a338",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.014705353998579,
+          "native": 0.10939973199856468
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.10592953200102784,
+          "numpy": 0.9213569310013554
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.9163504309981363,
+          "native": 0.10923687199829146
+        }
+      }
+    ]
+  },
+  "qwen35": {
+    "shape": [
+      9216,
+      2560
+    ],
+    "bytes": 9335936,
+    "sha256_fp32": "d3bb1ddff874dc7def4d0bdebad3b6faa8c352970cb92ad6998b5b381170397a",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.41461411899945233,
+          "native": 0.05032959600066533
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.050038926005072426,
+          "numpy": 0.3711073519953061
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.37501458099723095,
+          "native": 0.050126205998822115
+        }
+      }
+    ]
+  },
+  "gemma4": {
+    "shape": [
+      10240,
+      2560
+    ],
+    "bytes": 10372224,
+    "sha256_fp32": "0cb2c3db6c1689f6959eecb678848f2ef5caa7fd4aace33a58161ea1665dd352",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.46790118500211975,
+          "native": 0.055963165999855846
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.05567228599829832,
+          "numpy": 0.4208682789976592
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.420063528996252,
+          "native": 0.055698085998301394
+        }
+      }
+    ]
+  },
+  "qwen27": {
+    "shape": [
+      17408,
+      5120
+    ],
+    "bytes": 35213440,
+    "sha256_fp32": "cf71a3fc2972af45dff27feb45a89f13bfb83e29fb95d92aad7337e5ff808742",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.9213257750016055,
+          "native": 0.19458568599657156
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.19394247599848313,
+          "numpy": 1.6480588159975014
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 1.609611808002228,
+          "native": 0.19399649499973748
+        }
+      }
+    ]
+  },
+  "moe30": {
+    "shape": [
+      4096,
+      2048
+    ],
+    "bytes": 3326080,
+    "sha256_fp32": "53008faaf9c7c7754b176243e4168103d05281811e584b698dc8f60cef47159e",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.1461279889990692,
+          "native": 0.017125288002716843
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.016683319001458585,
+          "numpy": 0.12500402099976782
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.12664596999820787,
+          "native": 0.01696596800320549
+        }
+      }
+    ]
+  },
+  "gpt2": {
+    "shape": [
+      3072,
+      768
+    ],
+    "bytes": 942720,
+    "sha256_fp32": "6adef02403ddee727f19def02e1335f22409bb633e5583814ea108c7dc6711dc",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.04035960700275609,
+          "native": 0.0051619399964693
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.004880268999841064,
+          "numpy": 0.03728678700281307
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.03741873699618736,
+          "native": 0.005240790000243578
+        }
+      }
+    ]
+  },
+  "qwen": {
+    "shape": [
+      3072,
+      1024
+    ],
+    "bytes": 1253504,
+    "sha256_fp32": "0de068fd53082498711185ebd5dcaa4e4ed8924a6a22ed437fda19e447ff7403",
+    "runs": [
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.05701321599917719,
+          "native": 0.006808469996030908
+        }
+      },
+      {
+        "order": [
+          "native",
+          "numpy"
+        ],
+        "times": {
+          "native": 0.0063950399999157526,
+          "numpy": 0.04962102699937532
+        }
+      },
+      {
+        "order": [
+          "numpy",
+          "native"
+        ],
+        "times": {
+          "numpy": 0.049384236001060344,
+          "native": 0.006762290002370719
+        }
+      }
+    ]
+  }
+}

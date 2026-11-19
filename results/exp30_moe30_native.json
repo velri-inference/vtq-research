@@ -1,0 +1,32 @@
+{
+  "family": "moe30",
+  "spec": "VTQ_300",
+  "backend": "native",
+  "stream_unchanged": true,
+  "source_revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+  "seed_offset": 13000,
+  "cal_shape": [
+    64,
+    2048
+  ],
+  "matrices": 12480,
+  "source_keys": 18867,
+  "replaced_source_keys": 18624,
+  "unchanged_tensors": 243,
+  "unchanged_tensor_bytes": 1270247424,
+  "file_bytes": 13163438080,
+  "sha256": "36460648f2b66ecb125250ff3490fa36fd7f84d31f5e84f4acfccc65c404d13b",
+  "matrix_writer_s": 13.950187071262917,
+  "quant_plus_matrix_writes_s": 635.9123654079995,
+  "complete_export_fsync_s": 646.5801191220016,
+  "peak_extra_cuda_bytes": 5404368384,
+  "rss_before": {
+    "VmHWM": 3135860736,
+    "VmRSS": 3135860736
+  },
+  "rss_after": {
+    "VmHWM": 49238429696,
+    "VmRSS": 47798145024
+  },
+  "peak_extra_rss": 46102568960
+}
