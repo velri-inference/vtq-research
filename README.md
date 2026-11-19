@@ -1,10 +1,14 @@
-# vtq-research
+# VTQ — Velri Trellis Quant
 
-The research that LTQ (*Lumen Trellis Quant*) grew out of — the weight quantization format of the [Velri](https://github.com/lumen-inference/velri) engine: Python and CUDA quantizer prototypes, comparison rigs against EXL3 and GGUF, raw results. The [format specification](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-format.md), [rationale and summary tables](https://github.com/lumen-inference/velri/blob/main/docs/EN/ltq-design.md) live in Velri. Model files use `.vtq`; the LTQ v1 byte layout and internal tensor keys remain unchanged.
+VTQ is a trellis format for quantizing model weights in `16×256` supertiles. The current `.vtq` container uses magic `VTQ\0` and version `1`. The [format specification](docs/RU/vtq-format.md), [quantizer](src/vtq.py) and [reference reader and writer](src/vtq_format.py) on this branch describe the current layout; the older LTQ prototype is not its specification.
+
+For KLD evaluation, the [optional native reader](docs/RU/vtq-native-io.md) materializes `VTQ_300` weights on GPU 6.2–8.3× faster than the NumPy reader, with identical FP32 weights on [all eight benchmark models](docs/RU/universal-gate.md). This speeds up loading an existing file, not token generation.
 
 The metric is the same everywhere: mean KL divergence from BF16 with teacher-forced tokens on two traces that take no part in calibration — English Nemotron dialogues (`nem`) and a multilingual ru / zh / de / fr / es trace (`mul`); differences are computed with a paired bootstrap over dialogues.
 
-## How the format was derived
+## History: GGUF experiments through the LTQ prototype
+
+The milestones below describe earlier formats and their measurements, not the current VTQ layout or its format menu.
 
 Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level tables ≤ 32 entries — `pshufb`), an operation count per 256 weights on par with GGUF, quantization noticeably faster than EXL3 conversion, and quality no worse than EXL3 at the same bitrate.
 
@@ -24,10 +28,10 @@ Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level
 8. **Reproducibility.** Fisher sampled tokens randomly, and DP assignments drifted by ±5 % KLD between processes; sampling via the inverse CDF with fixed numbers brought it down to 1–2 %. Without Fisher weights the same menu is twice as bad.
 9. **Final TCQPQ menu** — 19 formats, K = 2…5, integer, D2 and D4, 2.04–5.29 bits/weight. Against EXL3 at the same bitrate: Qwen3-8B −10…−31 %, Qwen3-30B-A3B −52 % at 3.0 (attention gets 4.4 bits at the cost of 0.05 bits on experts), Qwen3.5-4B and Gemma 4 E4B −14…−26 % (against per-matrix EXL3, since the stock converter does not support them). Rejected after testing: K + 0.25, median-based winsorization (+38…+55 % KLD), a single-iteration DP profile.
 10. **Row tables** (embeddings, n-grams, PLE) — rings of the same trellis with Hadamard rotation: Gemma 4 E4B PLE at 4.25 bits — KLD 0.0010 at 1.39 GiB versus 0.0006 for int8 at 2.65 GiB.
-11. **The format is frozen** by the specification and the reference `src/ltq_format.py`: a self-test of 19 tile formats and 17 ring formats — 0 mismatches with the quantizer (`results/ltq_format_selftest.json`).
+11. **The LTQ prototype layout was frozen** by the specification and the reference `src/ltq_format.py`: a self-test of 19 tile formats and 17 ring formats — 0 mismatches with the quantizer (`results/ltq_format_selftest.json`).
 12. **Check against third-party quants** (Qwen3.8-27B, `results/q27_report.txt`): at the same bitrate of the decoder linear layers, −46…−49 % KLD vs GSQ-RCO (GGUF, IQ3_XXS / IQ3_S) and −32…−33 % vs EXL3 3.5; against self-calibrated EXL3 3.0 — within noise.
 
-Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration, chat and agents) is closer in domain to the evaluation traces than the competitors' calibration; a check with neutral calibration and an external trace has not been done yet.
+Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration, chat and agents) is closer in domain to the evaluation traces than the competitors' calibration; those comparisons are not neutral-calibration audits. For a separate VTQ result, see the [3B neutral audit](results/vtq_3b_neutral_audit.json).
 
 ## What's where
 
@@ -39,7 +43,7 @@ Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration,
 | `src/cpu/vtq_avx2_bench.c`, `src/cuda/vtq_matvec_bench.cu` | **VTQ** single-thread AVX2 and Blackwell `sm_120` FP32 / DP4A GEMV & GEMM decode kernels |
 | `src/liqk_v2.py` | earlier prototype quantizer (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices |
 | `src/tcq_proto.py`, `src/cuda/tcq_viterbi.cu` | Viterbi (torch reference and CUDA), table training, Gaussian rig |
-| `src/ltq_format.py`, `src/ltq_file.py` | format reference (tile, decode, self-test) and the `.vtq` container (write, read, full decode) |
+| `src/ltq_format.py`, `src/ltq_file.py` | Historical LTQ prototype reader, writer and self-tests; use `src/vtq_format.py` for current VTQ files. |
 | `src/hybrid_quant.py`, `src/streaming_quant.py` | layer-wise quantizers and evaluators for models that don't fit on the GPU, with any layer types; comparison with off-the-shelf GGUF and EXL3 |
 | `src/fisher_full.py`, `src/fisher_offload.py` | Fisher row weights |
 | `src/equal_bpw.py` | equal-bitrate comparison (1B, 3B) |
