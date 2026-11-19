@@ -1,0 +1,72 @@
+{
+  "family": "llama1",
+  "order": [
+    "numpy",
+    "native"
+  ],
+  "runs": {
+    "numpy": {
+      "family": "llama1",
+      "spec": "VTQ_300",
+      "backend": "numpy",
+      "source_revision": "5a8abab4a5d6f164389b1079fb721cfab8d7126c",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 112,
+      "source_keys": 146,
+      "replaced_source_keys": 112,
+      "unchanged_tensors": 34,
+      "unchanged_tensor_bytes": 525471744,
+      "file_bytes": 927575040,
+      "sha256": "1796539161c1034e0f8ca0e59fc7abd13e739b62085d8a885e48afaaaa9bcc9f",
+      "matrix_writer_s": 1.6062623739744595,
+      "quant_plus_matrix_writes_s": 23.776754566999443,
+      "complete_export_fsync_s": 26.213010168001347,
+      "peak_extra_cuda_bytes": 6269171712,
+      "rss_before": {
+        "VmHWM": 1780699136,
+        "VmRSS": 1780699136
+      },
+      "rss_after": {
+        "VmHWM": 2662313984,
+        "VmRSS": 2633584640
+      },
+      "peak_extra_rss": 881614848
+    },
+    "native": {
+      "family": "llama1",
+      "spec": "VTQ_300",
+      "backend": "native",
+      "source_revision": "5a8abab4a5d6f164389b1079fb721cfab8d7126c",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 112,
+      "source_keys": 146,
+      "replaced_source_keys": 112,
+      "unchanged_tensors": 34,
+      "unchanged_tensor_bytes": 525471744,
+      "file_bytes": 927575040,
+      "sha256": "1796539161c1034e0f8ca0e59fc7abd13e739b62085d8a885e48afaaaa9bcc9f",
+      "matrix_writer_s": 0.3783538729985594,
+      "quant_plus_matrix_writes_s": 22.531017197998153,
+      "complete_export_fsync_s": 25.353000415998395,
+      "peak_extra_cuda_bytes": 6269171712,
+      "rss_before": {
+        "VmHWM": 1780961280,
+        "VmRSS": 1780961280
+      },
+      "rss_after": {
+        "VmHWM": 2665730048,
+        "VmRSS": 2635886592
+      },
+      "peak_extra_rss": 884768768
+    }
+  },
+  "all_file_bytes_equal": true
+}

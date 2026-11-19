@@ -1,0 +1,1 @@
+[{"formats": 22, "negative_checks": 37, "mixed_slice_file_identical": true, "decoded_fp32_bits_identical": true, "device": "cpu"}, {"formats": 22, "negative_checks": 37, "mixed_slice_file_identical": true, "decoded_fp32_bits_identical": true, "device": "cuda"}]

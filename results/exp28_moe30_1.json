@@ -1,0 +1,72 @@
+{
+  "family": "moe30",
+  "order": [
+    "numpy",
+    "native"
+  ],
+  "runs": {
+    "numpy": {
+      "family": "moe30",
+      "spec": "VTQ_300",
+      "backend": "numpy",
+      "source_revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 12480,
+      "source_keys": 18867,
+      "replaced_source_keys": 18624,
+      "unchanged_tensors": 243,
+      "unchanged_tensor_bytes": 1270247424,
+      "file_bytes": 13163438080,
+      "sha256": "36460648f2b66ecb125250ff3490fa36fd7f84d31f5e84f4acfccc65c404d13b",
+      "matrix_writer_s": 32.14034769495265,
+      "quant_plus_matrix_writes_s": 638.6808235550016,
+      "complete_export_fsync_s": 645.1028239000007,
+      "peak_extra_cuda_bytes": 5404368384,
+      "rss_before": {
+        "VmHWM": 3142402048,
+        "VmRSS": 3142402048
+      },
+      "rss_after": {
+        "VmHWM": 63476752384,
+        "VmRSS": 63437131776
+      },
+      "peak_extra_rss": 60334350336
+    },
+    "native": {
+      "family": "moe30",
+      "spec": "VTQ_300",
+      "backend": "native",
+      "source_revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 12480,
+      "source_keys": 18867,
+      "replaced_source_keys": 18624,
+      "unchanged_tensors": 243,
+      "unchanged_tensor_bytes": 1270247424,
+      "file_bytes": 13163438080,
+      "sha256": "36460648f2b66ecb125250ff3490fa36fd7f84d31f5e84f4acfccc65c404d13b",
+      "matrix_writer_s": 13.564034027727757,
+      "quant_plus_matrix_writes_s": 352.74727816799714,
+      "complete_export_fsync_s": 359.3215042669981,
+      "peak_extra_cuda_bytes": 5404368384,
+      "rss_before": {
+        "VmHWM": 3137306624,
+        "VmRSS": 3137306624
+      },
+      "rss_after": {
+        "VmHWM": 63622111232,
+        "VmRSS": 63587848192
+      },
+      "peak_extra_rss": 60484804608
+    }
+  },
+  "all_file_bytes_equal": true
+}

@@ -1,0 +1,16 @@
+{
+  "qwen27": {
+    "status": "cached",
+    "path": "/root/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/37561816e66b5b9153b1b64c10968c18c1e6f4a0",
+    "bytes": 55563006776,
+    "shards": 18,
+    "revision": "37561816e66b5b9153b1b64c10968c18c1e6f4a0"
+  },
+  "moe30": {
+    "status": "cached",
+    "path": "/root/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B-Instruct-2507/snapshots/0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+    "bytes": 61066575656,
+    "shards": 16,
+    "revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe"
+  }
+}

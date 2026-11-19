@@ -43,6 +43,7 @@ import src.liqk_v2 as lv2
 from src.iqk_format import make_rademacher_signs
 from src.tcq_proto import ldlq_block256_cuda, viterbi_ub_cuda
 from src.vtq_v2 import DualCovAccumulator
+from src.vtq_stream_cov import ConsumableCov
 from src.vtq_format import (
     FMT_META,
     GAIN_UNIT,
@@ -359,12 +360,23 @@ def _get_spec_gpu_vtq(spec_name: str, dev: torch.device) -> Tuple[dict, torch.Te
 # =================================================================================================
 
 @torch.no_grad()
+def _rotate_owned_hessian(buf, rot_block, stripe):
+    """For private, contiguous Hessian storage only: reuse rotated row stripes."""
+    if stripe <= 0 or buf.shape[0] <= stripe:
+        return apply_vtq_rot(buf, rot_block=rot_block, transpose=False)
+    for rows in buf.split(stripe, dim=0):
+        rows.copy_(apply_vtq_rot(rows, rot_block=rot_block, transpose=False))
+    return buf
+
+
+@torch.no_grad()
 def compute_suh_vtq(
     W_f32: torch.Tensor,
     H_f32: torch.Tensor,
     seed: int = 1337,
     row_weights: Optional[torch.Tensor] = None,
     rot_block: int = -1,
+    h_stripe: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes `suh[K]` `(p_w = 0.50, p_h = -0.25)` and applies `Outer-DCT` (`rot_block=-1`) or `FWHT-256` (`256`)."""
     dev = W_f32.device
@@ -385,11 +397,37 @@ def compute_suh_vtq(
     suh = (signs * scale_suh).to(torch.float16).to(torch.float32)
 
     W_rot = apply_vtq_rot(W_f32 / suh.unsqueeze(0), rot_block=rot_block, transpose=False)
-    H_tmp = apply_vtq_rot(H_f32 * suh.unsqueeze(0), rot_block=rot_block, transpose=False)
-    H_rot = apply_vtq_rot((H_tmp.T * suh.unsqueeze(0)).contiguous(), rot_block=rot_block, transpose=False)
+    H_tmp = _rotate_owned_hessian(H_f32 * suh.unsqueeze(0), rot_block, h_stripe)
+    # H_tmp owns the first rotation. Release its K x K storage before the
+    # second rotation rather than carrying it across both factor matmuls.
+    H_left = H_tmp.T.mul_(suh.unsqueeze(0)).contiguous()
     del H_tmp
-    H_rot = (0.5 * (H_rot + H_rot.T)).contiguous()
+    H_rot = _rotate_owned_hessian(H_left, rot_block, h_stripe)
+    del H_left
+    H_rot = (H_rot + H_rot.T).mul_(0.5).contiguous()
     return W_rot, H_rot, suh
+
+
+def _initial_tile_scales(w, cfg_scale, spec_name):
+    return w.reshape(w.shape[0], -1, TILE).square().mean(dim=2).sqrt().clamp(min=1e-10) * cfg_scale
+
+
+def _initial_block_u8(w, cfg_scale, step_row, spec_name):
+    rms_cur = w.square().mean(dim=1).sqrt().clamp(min=1e-10) * cfg_scale
+    u_init_f = torch.round(rms_cur / step_row).clamp(1.0, 255.0)
+    return u_init_f, (step_row * u_init_f).clamp(min=1e-10)
+
+
+def _refit_block_u8(A_c, B_c, step_row, u_init_f, d_init):
+    """Monotone row-wise scale fit for a fixed 256-column code block."""
+    den = (B_c * B_c).sum(dim=1)
+    d_cont = torch.where(den > 1e-12, (A_c * B_c).sum(dim=1) / den.clamp(min=1e-12), d_init).clamp(min=1e-10)
+    u_opt_f = torch.round(d_cont / step_row).clamp(1.0, 255.0)
+    d_opt_q = step_row * u_opt_f
+    l_init = (A_c - d_init.unsqueeze(1) * B_c).square().sum(dim=1)
+    l_opt = (A_c - d_opt_q.unsqueeze(1) * B_c).square().sum(dim=1)
+    u_fin_f = torch.where(l_opt < l_init, u_opt_f, u_init_f)
+    return u_fin_f, step_row * u_fin_f
 
 
 @torch.no_grad()
@@ -419,7 +457,7 @@ def _quantize_rows_vtq_ldlq(
     frac = int(cfg["frac"])
     cfg_scale = float(cfg.get("scale", 1.0))
 
-    rms_rb = W_sub.view(R, nblocks, TILE).square().mean(dim=2).sqrt().clamp(min=1e-10) * cfg_scale
+    rms_rb = _initial_tile_scales(W_sub, cfg_scale, spec_name)
     d_row_fp16 = (rms_rb.max(dim=1).values * (128.0 / 224.0)).clamp(min=1e-7).to(torch.float16)
     d_row_f32 = d_row_fp16.float().clamp(min=1e-8)
     step_row = (d_row_f32 * float(U_SB_UNIT)).clamp(min=1e-12)
@@ -439,9 +477,7 @@ def _quantize_rows_vtq_ldlq(
         U_blk_inv = U_blks_inv[ibl]
         dw_blk = dw_diag[ibl]
 
-        rms_cur = w_blk_start.square().mean(dim=1).sqrt().clamp(min=1e-10) * cfg_scale
-        u_init_f = torch.round(rms_cur / step_row).clamp(1.0, 255.0)
-        d_init = (step_row * u_init_f).clamp(min=1e-10)
+        u_init_f, d_init = _initial_block_u8(w_blk_start, cfg_scale, step_row, spec_name)
 
         if emit_pack:
             G_blk, g_b, c_b, u_b = ldlq_vtq_block256_cuda(
@@ -455,15 +491,7 @@ def _quantize_rows_vtq_ldlq(
 
         A_c = w_blk_start @ U_blk_inv
         B_c = G_blk @ U_blk_inv
-        den = (B_c * B_c).sum(dim=1)
-        d_cont = torch.where(den > 1e-12, (A_c * B_c).sum(dim=1) / den.clamp(min=1e-12), d_init).clamp(min=1e-10)
-
-        u_opt_f = torch.round(d_cont / step_row).clamp(1.0, 255.0)
-        d_opt_q = step_row * u_opt_f
-        l_init = (A_c - d_init.unsqueeze(1) * B_c).square().sum(dim=1)
-        l_opt = (A_c - d_opt_q.unsqueeze(1) * B_c).square().sum(dim=1)
-        u_fin_f = torch.where(l_opt < l_init, u_opt_f, u_init_f)
-        d_fin = step_row * u_fin_f
+        u_fin_f, d_fin = _refit_block_u8(A_c, B_c, step_row, u_init_f, d_init)
 
         G_nat_all[:, c0:c1] = G_blk
         u_sb_all[:, ibl] = u_fin_f.to(torch.uint8)
@@ -582,6 +610,8 @@ def quantize_matrix_vtq(
     W_target: Optional[torch.Tensor] = None,
     u_sb_gecd_sweeps: Optional[int] = None,
     d_sb_gecd_sweeps: Optional[int] = None,
+    compact_wide_workspace: bool = False,
+    row_energy_tilt: float = 0.,
 ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, float]:
     """Quantizes `W [M, Kin]` (`Kin % 256 == 0`) into VTQ with bit-exact `assemble_vtq` output."""
     if not VTQ_CONFIG:
@@ -598,7 +628,9 @@ def quantize_matrix_vtq(
     assert Kin % TILE == 0, f"VTQ requires Kin % 256 == 0, got Kin={Kin}"
     nblocks = Kin // TILE
 
-    W_rot, H_rot, suh = compute_suh_vtq(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block)
+    compact_wide = compact_wide_workspace and Kin >= 8192
+    rot_kw = {'h_stripe': 1024} if compact_wide else {}
+    W_rot, H_rot, suh = compute_suh_vtq(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block, **rot_kw)
     _mem_mark("suh_rot")
     dmean = H_rot.diagonal().mean().clamp(min=1e-8)
     # `H_rot` is only needed afterwards by the two-sided Gauss-Seidel polish (`u_sb_gecd_sweeps > 0`); otherwise
@@ -613,7 +645,13 @@ def quantize_matrix_vtq(
     L_flip = torch.linalg.cholesky(H_flip)
     del H_flip
     _mem_mark("cholesky")
-    U_inv_flip = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False)
+    if compact_wide:
+        # A column-major RHS can be overwritten directly by the triangular solve.
+        rhs = torch.eye(Kin, dtype=L_flip.dtype, device=dev).T
+        U_inv_flip = torch.linalg.solve_triangular(L_flip, rhs, upper=False, out=rhs)
+        del rhs
+    else:
+        U_inv_flip = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False)
     del L_flip
     U_nat = U_inv_flip.flip(0, 1)
     del U_inv_flip
@@ -647,21 +685,19 @@ def quantize_matrix_vtq(
         by_spec.setdefault(sp, []).append((r0, r1))
 
     emit_pack = (PACK is not None) or (lv2.PACK is not None)
-    G_nat_all = torch.empty((M, Kin), dtype=torch.float32, device=dev)
-    d_row_all = torch.empty((M,), dtype=torch.float16, device=dev)
-    u_sb_all = torch.empty((M, nblocks), dtype=torch.uint8, device=dev)
-    pm = (
-        {
-            "g_sub": torch.empty((M, nblocks, 16), dtype=torch.uint8, device=dev),
-            "c_all": torch.empty((M, nblocks, 16, 2), dtype=torch.uint8, device=dev),
-            "u_all": torch.empty((M, nblocks, 256), dtype=torch.uint8, device=dev),
-        }
-        if emit_pack
-        else None
-    )
+    # Skip gather/scatter (and an entire second set of outputs) for a single full slice.
+    full_slice = len(row_slices) == 1 and row_slices[0][:2] == (0, M)
+    pm = None
+    if not full_slice:
+        G_nat_all = torch.empty_like(W_rot)
+        d_row_all = torch.empty((M,), dtype=torch.float16, device=dev)
+        u_sb_all = torch.empty((M, nblocks), dtype=torch.uint8, device=dev)
+        if emit_pack:
+            pm = {k: torch.empty((M, nblocks, *shape), dtype=torch.uint8, device=dev)
+                  for k, shape in (("g_sub", (16,)), ("c_all", (16, 2)), ("u_all", (256,)))}
 
     for sp, ranges in by_spec.items():
-        rows_idx = torch.cat([torch.arange(r0, r1, device=dev) for r0, r1 in ranges], dim=0)
+        rows_idx = slice(None) if full_slice else torch.cat([torch.arange(r0, r1, device=dev) for r0, r1 in ranges])
         sub_out = _quantize_rows_vtq_ldlq(
             W_rot[rows_idx],
             U_nat,
@@ -673,6 +709,12 @@ def quantize_matrix_vtq(
             emit_pack=emit_pack,
             u_sb_gecd_sweeps=u_sb_gecd_sweeps,
         )
+        if full_slice:
+            G_nat_all, d_row_all, u_sb_all = sub_out["G_nat"], sub_out["d_row"], sub_out["u_sb"]
+            if emit_pack:
+                pm = {k: sub_out[k] for k in ("g_sub", "c_all", "u_all")}
+            del sub_out
+            break
         G_nat_all[rows_idx] = sub_out["G_nat"]
         d_row_all[rows_idx] = sub_out["d_row"]
         u_sb_all[rows_idx] = sub_out["u_sb"]
@@ -680,6 +722,7 @@ def quantize_matrix_vtq(
             pm["g_sub"][rows_idx] = sub_out["g_sub"]
             pm["c_all"][rows_idx] = sub_out["c_all"]
             pm["u_all"][rows_idx] = sub_out["u_all"]
+        del sub_out
 
     del U_nat, U_blks, U_blks_inv, gs_ctx, W_rot
     _mem_mark("ldlq")
@@ -725,7 +768,7 @@ def quantize_matrix_vtq(
             del A_in
             valid_s = torch.isfinite(suh_try.float()) & (suh_try.float().abs() > 0.05) & (suh_try.float().abs() < 10.0)
             suh_try = torch.where(valid_s, suh_try, suh_fp16)
-            W_hat_cand = U_scaled * suh_try.float().unsqueeze(0)
+            W_hat_cand = U_scaled.mul_(suh_try.float().unsqueeze(0))
             HQ_cand = W_hat_cand @ H_f32
             if rw is not None:
                 l_old = float((((HW - HQ) * (W_src - W_hat_eff)).sum(dim=1) * rw).sum())
@@ -744,9 +787,24 @@ def quantize_matrix_vtq(
             break
     _mem_mark("refit")
 
-    if emit_pack and pm is not None:
-        W_hat_eff = assemble_vtq(G_nat_all, d_row_all, u_sb_all, suh_fp16, rot_block=rot_block)
+    if row_energy_tilt:
+        # exp29: least-squares refits may shrink per-row output RMS. Move the
+        # existing row scale toward matching E[(Wx)^2] on calibration inputs.
+        # Reconstruct from the rounded fp16 scale, not by scaling W_hat_eff.
+        if not -1. <= row_energy_tilt <= 1.: raise ValueError('invalid row-energy tilt')
+        orig_e = (W_src * HW).sum(1).clamp_min(1e-20)
+        recon_e = (W_hat_eff * HQ).sum(1).clamp_min(1e-20)
+        ratio = (orig_e / recon_e).sqrt().clamp(.8, 1.25).pow(row_energy_tilt)
+        new_d = (d_row_all.float() * ratio).half()
+        d_row_all = torch.where(torch.isfinite(new_d) & (new_d > 0), new_d, d_row_all)
+        ds = d_row_all.float().unsqueeze(1) * (u_sb_all.float() * float(U_SB_UNIT))
+        W_rot_hat = (G_nat_all.view(M, nblocks, TILE) * ds.unsqueeze(-1)).reshape(M, Kin)
+        W_hat_eff = apply_vtq_rot(W_rot_hat, rot_block=rot_block, transpose=True) * suh_fp16.float().unsqueeze(0)
         HQ = W_hat_eff @ H_f32
+
+    if emit_pack and pm is not None:
+        # W_hat_eff and HQ already correspond to the last accepted fp16 scales;
+        # rerunning the inverse rotation and the dense Hessian product is redundant.
         pack_dict = {
             "row_slices": row_slices,
             "c_all": pm["c_all"],
@@ -1548,6 +1606,10 @@ def polish_model_scales_kld_checkpointed(
     return time.perf_counter() - t0
 
 
+def _drift_target(w, b, alpha):
+    return w * (1.0 + alpha * b) if b.ndim == 1 else w + alpha * (w @ b.T)
+
+
 @torch.no_grad()
 def quantize_llama_model_vtq(
     model: nn.Module,
@@ -1564,6 +1626,10 @@ def quantize_llama_model_vtq(
     polish_steps: int = 0,
     polish_lr: float = 4e-4,
     ref_hidden_cpu: Optional[torch.Tensor] = None,
+    final_calibration=None,
+    down_output_fit=None,
+    reuse_reference_mlp: bool = False,
+    compact_gptaq: bool = False,
 ) -> dict:
     """Layer-by-layer streaming VTQ quantizer with asymmetric `GPTAQ` (`Qwen` QK-Norm safe via `sq._attn`)
     and optional `O(1)`-layer gradient-checkpointed scale polish."""
@@ -1588,6 +1654,8 @@ def quantize_llama_model_vtq(
     n_seqs, seq_len = cal_tokens.shape
     n_layers = model.config.num_hidden_layers
     use_g = eff_gptaq > 0.0
+    cov_factory = ConsumableCov if compact_gptaq else DualCovAccumulator
+    reuse_reference_mlp = reuse_reference_mlp or compact_gptaq
 
     cal_q = [model.model.embed_tokens(cal_tokens[i : i + batch_size].to(device)) for i in range(0, n_seqs, batch_size)]
     cal_r = [c.clone() for c in cal_q] if use_g else cal_q
@@ -1605,12 +1673,16 @@ def quantize_llama_model_vtq(
             lq.mlp.down_proj.weight.data = lq.mlp.down_proj.weight.data[:, perm_l].contiguous()
         lr = copy.deepcopy(lq) if use_g else lq
 
-        def q_mod(mod: nn.Linear, H: torch.Tensor, B: Optional[torch.Tensor], full_name: str, seed_i: int, dm: float):
+        def q_mod(mod: nn.Linear, H: torch.Tensor, B: Optional[torch.Tensor], full_name: str, seed_i: int, dm: float, *, output_delta=None):
             nonlocal total_params, total_bits
             W = mod.weight.data.float()
             M_r, K_in = W.shape
             r_specs = [(0, M_r, spec_or_assignment)] if isinstance(spec_or_assignment, str) else spec_or_assignment[(l_idx, full_name)]
-            W_tgt = (W + eff_gptaq * (W @ B.T)) if (use_g and B is not None) else None
+            W_tgt = None
+            if output_delta is not None:
+                W_tgt = W + eff_gptaq * output_delta
+            elif use_g and B is not None:
+                W_tgt = _drift_target(W, B, eff_gptaq)
             sr = fisher_out[(l_idx, full_name)].to(device)
             rb = resolve_rot_block(full_name, rot_block=rot_block, rot_mode=rot_mode)
             _, w_hat, _ = quantize_matrix_vtq(
@@ -1625,7 +1697,7 @@ def quantize_llama_model_vtq(
 
         # 1) q_proj, k_proj, v_proj
         g_damp = max(damp, 0.20)
-        acc = DualCovAccumulator(use_g)
+        acc = cov_factory(use_g)
         for cq, cr in zip(cal_q, cal_r):
             acc.add(lq.input_layernorm(cq), lr.input_layernorm(cr) if use_g else None)
         Hqkv, Bqkv = acc.get(gptaq_damp=g_damp)
@@ -1634,7 +1706,7 @@ def quantize_llama_model_vtq(
         del Hqkv, Bqkv, acc
 
         # 2) o_proj + attention residual update
-        acc = DualCovAccumulator(use_g)
+        acc = cov_factory(use_g)
         bq, br = [None], [None]
         hq = lq.self_attn.o_proj.register_forward_pre_hook(lambda m, a: bq.__setitem__(0, a[0]))
         hr = lr.self_attn.o_proj.register_forward_pre_hook(lambda m, a: br.__setitem__(0, a[0])) if use_g else None
@@ -1658,7 +1730,7 @@ def quantize_llama_model_vtq(
             ref_mid = cal_q
 
         # 3) gate_proj, up_proj
-        acc = DualCovAccumulator(use_g)
+        acc = cov_factory(use_g)
         for cq, crm in zip(cal_q, ref_mid):
             acc.add(lq.post_attention_layernorm(cq), lr.post_attention_layernorm(crm) if use_g else None)
         Hup, Bup = acc.get(gptaq_damp=g_damp)
@@ -1667,30 +1739,47 @@ def quantize_llama_model_vtq(
         del Hup, Bup, acc
 
         # 4) down_proj + MLP residual update
-        acc = DualCovAccumulator(use_g)
+        fit_output = down_output_fit is not None and use_g
+        acc = down_output_fit() if fit_output else cov_factory(use_g)
         hq = lq.mlp.down_proj.register_forward_pre_hook(lambda m, a: bq.__setitem__(0, a[0]))
-        hr = lr.mlp.down_proj.register_forward_pre_hook(lambda m, a: br.__setitem__(0, a[0])) if use_g else None
-        for cq, crm in zip(cal_q, ref_mid):
-            lq.mlp(lq.post_attention_layernorm(cq))
-            if use_g:
-                lr.mlp(lr.post_attention_layernorm(crm))
-            acc.add(bq[0], br[0])
+        hr = lr.mlp.down_proj.register_forward_pre_hook(lambda m, a: br.__setitem__(0, a[0])) if use_g and not fit_output else None
+        for i, (cq, crm) in enumerate(zip(cal_q, ref_mid)):
+            if fit_output:
+                yq = lq.mlp(lq.post_attention_layernorm(cq))
+                yr = lr.mlp(lr.post_attention_layernorm(crm))
+                acc.add_outputs(bq[0], yq, yr, cq, crm)
+                cal_r[i] = crm + yr
+                del yq, yr
+            else:
+                lq.mlp(lq.post_attention_layernorm(cq))
+                if use_g:
+                    if reuse_reference_mlp:
+                        cal_r[i] = crm + lr.mlp(lr.post_attention_layernorm(crm))
+                    else:
+                        lr.mlp(lr.post_attention_layernorm(crm))
+                acc.add(bq[0], br[0])
             bq[0] = br[0] = None
         hq.remove()
         if hr is not None:
             hr.remove()
         Hdn, Bdn = acc.get(gptaq_damp=g_damp * 1.5)
-        q_mod(lq.mlp.down_proj, Hdn, Bdn, "mlp.down_proj", 1000 + l_idx * 10 + 6, 1.5)
+        q_mod(lq.mlp.down_proj, Hdn, None if fit_output else Bdn, "mlp.down_proj", 1000 + l_idx * 10 + 6, 1.5,
+              output_delta=Bdn if fit_output else None)
         del Hdn, Bdn, acc
 
         for i in range(len(cal_q)):
             cal_q[i] = cal_q[i] + lq.mlp(lq.post_attention_layernorm(cal_q[i]))
         if use_g:
-            for i in range(len(cal_r)):
-                cal_r[i] = ref_mid[i] + lr.mlp(lr.post_attention_layernorm(ref_mid[i]))
+            if not (fit_output or reuse_reference_mlp):
+                for i in range(len(cal_r)):
+                    cal_r[i] = ref_mid[i] + lr.mlp(lr.post_attention_layernorm(ref_mid[i]))
             del lr
         del ref_mid
 
+    if final_calibration is not None:
+        if not use_g:
+            raise ValueError('paired final calibration requires a distinct reference stream')
+        final_calibration(model, cal_q, cal_r)
     del cal_q, cal_r
     torch.cuda.empty_cache()
     quant_sec = time.perf_counter() - t_start

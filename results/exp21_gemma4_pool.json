@@ -1,0 +1,38 @@
+{
+  "inputs": [
+    "exp21_gemma4_2000.json",
+    "exp21_gemma4_3000.json",
+    "exp21_gemma4_4000.json"
+  ],
+  "model": "/root/.cache/huggingface/hub/models--unsloth--gemma-4-E4B-it/snapshots/4e22d7e59e078e63a14f351efdc5232ed366b621",
+  "spec": "VTQ_300",
+  "offsets": [
+    2000,
+    3000,
+    4000
+  ],
+  "paired": {
+    "nemotron": {
+      "skip-tangent": {
+        "mean_diff": -0.0005023541875167625,
+        "ci95_lo": -0.0025330061596127522,
+        "ci95_hi": 0.0016195344892269814,
+        "p_a_better": 0.67125,
+        "rel_pct": -0.6409791236703873,
+        "baseline": 0.07837294054760661,
+        "candidate": 0.07787058636008985
+      }
+    },
+    "multilingual": {
+      "skip-tangent": {
+        "mean_diff": -0.00010716781796740737,
+        "ci95_lo": -0.0024350074921958556,
+        "ci95_hi": 0.0021369346295344034,
+        "p_a_better": 0.536,
+        "rel_pct": -0.12011945911854775,
+        "baseline": 0.08921769940842124,
+        "candidate": 0.08911053159045383
+      }
+    }
+  }
+}
