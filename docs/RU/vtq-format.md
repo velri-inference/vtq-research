@@ -1,6 +1,6 @@
 # Спецификация формата и квантователя VTQ (*Velri Trellis Quant*, `.vtq`)
 
-Документ описывает основной бинарный формат квантования весов **VTQ** (`MAGIC = b"VTQ\0"`, `VERSION = 1`), эталонный декодер и контейнер [`src/vtq_format.py`](../../src/vtq_format.py), квантователь [`src/vtq.py`](../../src/vtq.py), ядра декодирования для CPU AVX2 ([`src/cpu/vtq_avx2_bench.c`](../../src/cpu/vtq_avx2_bench.c)) и GPU Blackwell `sm_120` ([`src/cuda/vtq_matvec_bench.cu`](../../src/cuda/vtq_matvec_bench.cu)), а также результаты сквозных бенчмарков скорости, памяти и качества (`KLD` относительно `BF16`, парный бутстрап `B = 2000`) на **8 языковых моделях** в диапазоне **`1.60–6.23 бит/вес`** (`bpw`).
+Документ описывает основной бинарный формат квантования весов **VTQ** (`MAGIC = b"VTQ\0"`, `VERSION = 2`), эталонный декодер и контейнер [`src/vtq_format.py`](../../src/vtq_format.py), квантователь [`src/vtq.py`](../../src/vtq.py), ядра декодирования для CPU AVX2 ([`src/cpu/vtq_avx2_bench.c`](../../src/cpu/vtq_avx2_bench.c)) и GPU Blackwell `sm_120` ([`src/cuda/vtq_matvec_bench.cu`](../../src/cuda/vtq_matvec_bench.cu)), а также результаты сквозных бенчмарков скорости, памяти и качества (`KLD` относительно `BF16`, парный бутстрап `B = 2000`) на **8 языковых моделях** в диапазоне **`1.60–6.23 бит/вес`** (`bpw`).
 
 ---
 
@@ -156,7 +156,24 @@ $$
 
 ## 6. Бинарный контейнер `.vtq` (`VtqWriter` / `VtqFile`)
 
-Заголовок совместим с `mmap` (`MAGIC = b"VTQ\0"`, `VERSION = uint32_le(1)`), начало секции данных и каждый тензор выровнены на `64` байта. Поскольку `u_sb[16]` встроен в супер-тайл, на матрицу `<prefix>` пишутся **4** тензора:
+Контейнер совместим с `mmap` (`MAGIC = b"VTQ\0"`, `VERSION = uint32_le(2)`), начало секции данных и каждый тензор выровнены на `64` байта. JSON-метаданные (`config`, `tokenizer`, `chat_template`, `quantization`, индекс `tensors`) пишутся **в конец файла (footer)** за один потоковый проход без фиксированного лимита `reserve` и без холостого резервирования в начале файла (`VtqFile` сохраняет обратную совместимость при чтении файлов `VERSION = 1`):
+
+```text
++-----------------------------------------------------------------------+
+| Offset  0..3   (4 B)  : MAGIC         = b"VTQ\0"                      |
+| Offset  4..7   (4 B)  : VERSION       = uint32_le(2)                  |
+| Offset  8..15  (8 B)  : header_offset = uint64_le(footer_offset)      |
+| Offset 16..23  (8 B)  : header_len    = uint64_le(len(json_bytes))    |
+| Offset 24..31  (8 B)  : data_off      = uint64_le(64)  (% 64 == 0)    |
+| Offset 32..63  (32 B) : reserved      = 0                             |
++-----------------------------------------------------------------------+
+| Offset data_off .. header_offset - 1 : тензоры (64-byte aligned)      |
++-----------------------------------------------------------------------+
+| Offset header_offset .. EOF          : UTF-8 JSON (метаданные+индекс) |
++-----------------------------------------------------------------------+
+```
+
+Хелпер `source_metadata(model_dir)` в `src/vtq_format.py` собирает `config.json`, `generation_config.json`, `tokenizer.json`, `tokenizer_config.json`, `preprocessor_config.json`, `video_preprocessor_config.json` и `chat_template` для упаковки модели в единый файл. Поскольку `u_sb[16]` встроен в супер-тайл, на квантованную матрицу `<prefix>` пишутся **4** тензора:
 
 1. `<prefix>.vtq.data` — `u8 [N_bytes]`: конкатенация 64-байтно выровненных массивов супер-тайлов;
 2. `<prefix>.vtq.slices` — `i32 [S, 5]`: `[r0, r1, fmt_idx, byte_offset, rot_block]` по полосам смешанной точности;

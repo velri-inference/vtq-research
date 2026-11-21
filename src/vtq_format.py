@@ -44,7 +44,8 @@ from src.vtq_v2_format import (
 TILE = 256
 SUPER_ROWS = 16
 MAGIC = b"VTQ\0"
-VERSION = 1
+VERSION = 2
+PREFIX_BYTES = 64
 
 TAB_UNIT = np.float32(1.0 / 64.0)
 GAIN_UNIT = np.float32(1.0 / 64.0)
@@ -588,15 +589,41 @@ def assemble_vtq(
 # `.vtq` Binary Container (`VtqWriter` & `VtqFile`)
 # ------------------------------------------------------------------------------------------------
 
+def source_metadata(model_dir: Path) -> dict:
+    """Source model metadata for the JSON footer: config, generation_config, tokenizer(_config), chat template, processor."""
+    model_dir = Path(model_dir)
+    out = {}
+    for key, fn in (
+        ("config", "config.json"),
+        ("generation_config", "generation_config.json"),
+        ("tokenizer", "tokenizer.json"),
+        ("tokenizer_config", "tokenizer_config.json"),
+        ("processor_config", "preprocessor_config.json"),
+        ("video_processor_config", "video_preprocessor_config.json"),
+    ):
+        if (model_dir / fn).exists():
+            out[key] = json.loads((model_dir / fn).read_text(encoding="utf-8"))
+    if (model_dir / "chat_template.jinja").exists():
+        out["chat_template"] = (model_dir / "chat_template.jinja").read_text(encoding="utf-8")
+    elif "chat_template" in out.get("tokenizer_config", {}):
+        out["chat_template"] = out["tokenizer_config"]["chat_template"]
+    return out
+
+
 class VtqWriter:
-    def __init__(self, path: Path, formats: list[VtqFormat], reserve: int = (4 << 20) - 16, *, codec=None):
+    """Streams a `.vtq` v2 container: 64-byte prefix, 64-byte-aligned tensor payload, unlimited UTF-8 JSON footer."""
+
+    def __init__(self, path: Path, formats: list[VtqFormat], reserve: int | None = None, *, codec=None):
+        # `reserve` is accepted for backwards API compatibility and ignored: v2 writes metadata as a footer with no size limit.
         # The caller (never checkpoint metadata) may supply an explicit CPU codec.
         self._pack_tiles = pack_supertiles_vtq if codec is None else codec.pack
         self.f = open(path, "w+b")
-        self.reserve = _align(16 + reserve, 64) - 16
-        self.data_off = 16 + self.reserve
+        self.reserve = 0 if reserve is None else reserve
+        self.data_off = PREFIX_BYTES
         self.f.write(b"\0" * self.data_off)
         self.pos = 0
+        self.header_offset = 0
+        self.header_len = 0
         self.tensors: dict[str, dict] = {}
         self.formats = formats
         self.fmt_idx = {fmt.name: i for i, fmt in enumerate(formats)}
@@ -653,40 +680,100 @@ class VtqWriter:
         self.add_tensor(f"{prefix}.vtq.suh", m["suh"].to(torch.float16))
 
     def finalize(self, meta: dict):
-        hdr = json.dumps({**meta, "tensors": self.tensors}, separators=(",", ":")).encode("utf-8")
-        assert len(hdr) <= self.reserve, f"header {len(hdr)} B > reserve {self.reserve} B"
+        self.f.seek(self.data_off + self.pos)
+        self._pad(64)
+        self.header_offset = self.data_off + self.pos
+        hdr = json.dumps({**meta, "tensors": self.tensors}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.header_len = len(hdr)
+        self.f.write(hdr)
         self.f.seek(0)
-        self.f.write(MAGIC + struct.pack("<I", VERSION) + struct.pack("<Q", len(hdr)) + hdr + b" " * (self.reserve - len(hdr)))
+        self.f.write(
+            MAGIC
+            + struct.pack("<IQQQ", VERSION, self.header_offset, self.header_len, self.data_off)
+            + b"\0" * (PREFIX_BYTES - 32)
+        )
         self.f.close()
 
 
 class VtqFile:
+    """Memory-mapped `.vtq` reader supporting v2 (footer JSON) and legacy v1/v3 (header-at-start JSON)."""
+
     def __init__(self, path: Path, *, codec=None):
         import mmap
 
         self._unpack_tiles = decode_supertiles_vtq if codec is None else codec.unpack
 
         self.f = open(path, "rb")
-        self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
-        magic, ver, hlen = struct.unpack_from("<4sIQ", self.mm, 0)
-        assert magic == MAGIC and ver in (VERSION, 3), f"not a .vtq file: {magic!r} v{ver}"
-        self.header = json.loads(bytes(self.mm[16 : 16 + hlen]))
-        self.formats = [format_from_json_vtq(d) for d in self.header["quantization"]["formats"]]
-        # VtqWriter pads the header with spaces but the tensor payload can
-        # itself begin with 0x20 (a perfectly valid packed trellis byte).
-        # Its final tensor ends at EOF, so scan no further than the last
-        # possible aligned start that still fits all declared tensor bytes.
-        extent = max((t["offset"] + math.prod(t["shape"]) * np.dtype(DTYPES[t["dtype"]][0]).itemsize
-                      for t in self.header["tensors"].values()), default=0)
-        last_start = (len(self.mm) - extent) // 64 * 64
-        end = 16 + hlen
-        if _align(end, 64) > last_start:
+        try:
+            self.mm = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
+        except BaseException:
+            self.f.close()
+            raise
+        try:
+            if len(self.mm) < 16:
+                raise ValueError("truncated VTQ file prefix")
+            magic, ver = struct.unpack_from("<4sI", self.mm, 0)
+            assert magic == MAGIC and ver in (1, VERSION, 3), f"not a .vtq file: {magic!r} v{ver}"
+            self.version = ver
+            if ver == VERSION:
+                if len(self.mm) < PREFIX_BYTES:
+                    raise ValueError("truncated VTQ v2 file prefix")
+                header_offset, hlen, data_off = struct.unpack_from("<QQQ", self.mm, 8)
+                if (
+                    bytes(self.mm[32:PREFIX_BYTES]) != b"\0" * (PREFIX_BYTES - 32)
+                    or data_off < PREFIX_BYTES
+                    or data_off % 64 != 0
+                    or header_offset < data_off
+                    or hlen == 0
+                    or header_offset + hlen > len(self.mm)
+                ):
+                    raise ValueError("invalid VTQ v2 container prefix")
+                self.data_off = data_off
+                self.header_offset = header_offset
+                self.header = json.loads(bytes(self.mm[header_offset : header_offset + hlen]))
+                for name, t in self.header["tensors"].items():
+                    off = t["offset"]
+                    n = math.prod(t["shape"]) * np.dtype(DTYPES[t["dtype"]][0]).itemsize
+                    if off < 0 or data_off + off + n > header_offset:
+                        raise ValueError(f"truncated VTQ tensor payload: {name}")
+            else:
+                (hlen,) = struct.unpack_from("<Q", self.mm, 8)
+                if 16 + hlen > len(self.mm):
+                    raise ValueError("truncated VTQ header")
+                self.header_offset = 16
+                self.header = json.loads(bytes(self.mm[16 : 16 + hlen]))
+                # Legacy v1/v3 VtqWriter padded the header with spaces, while tensor payload can
+                # itself begin with 0x20 (a valid packed trellis byte). Its final tensor ends at
+                # EOF, so scan no further than the last aligned start that fits all tensor bytes.
+                extent = max(
+                    (
+                        t["offset"] + math.prod(t["shape"]) * np.dtype(DTYPES[t["dtype"]][0]).itemsize
+                        for t in self.header["tensors"].values()
+                    ),
+                    default=0,
+                )
+                last_start = (len(self.mm) - extent) // 64 * 64
+                end = 16 + hlen
+                if _align(end, 64) > last_start:
+                    raise ValueError("truncated VTQ tensor payload")
+                while end < last_start and self.mm[end] == 0x20:
+                    end += 1
+                self.data_off = _align(end, 64)
+            self.formats = [format_from_json_vtq(d) for d in self.header["quantization"]["formats"]]
+        except BaseException:
             self.mm.close()
             self.f.close()
-            raise ValueError("truncated VTQ tensor payload")
-        while end < last_start and self.mm[end] == 0x20:
-            end += 1
-        self.data_off = _align(end, 64)
+            raise
+
+    def close(self):
+        self.mm.close()
+        self.f.close()
+
+    def __enter__(self) -> VtqFile:
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def raw(self, name: str) -> memoryview:
         t = self.header["tensors"][name]
@@ -913,8 +1000,8 @@ def self_test(cpu_only: bool = False) -> dict:
                 verify=True,
             )
             wr.finalize({"format": "vtq", "quantization": {"formats": [format_json_vtq(f) for f in synth_fmts]}})
-            vf = VtqFile(p)
-            W_reloaded = vf.decode_matrix("model.layers.0.self_attn.q_proj", device=dev)
+            with VtqFile(p) as vf:
+                W_reloaded = vf.decode_matrix("model.layers.0.self_attn.q_proj", device=dev)
             W_expected = apply_vtq_rot(torch.from_numpy(W_rot_ref).to(dev), rot_block=-1, transpose=True) * suh.float().unsqueeze(0)
             c_diff = float((W_reloaded - W_expected).abs().max().item())
             assert c_diff < 1e-6, f"Container roundtrip diff={c_diff}"

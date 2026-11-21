@@ -1,6 +1,6 @@
 # VTQ — Velri Trellis Quant
 
-VTQ is a trellis format for quantizing model weights in `16×256` supertiles. The current `.vtq` container uses magic `VTQ\0` and version `1`. The [format specification](docs/RU/vtq-format.md), [quantizer](src/vtq.py) and [reference reader and writer](src/vtq_format.py) on this branch describe the current layout; the older LTQ prototype is not its specification.
+VTQ is a trellis format for quantizing model weights in `16×256` supertiles. The current `.vtq` container uses magic `VTQ\0` and version `2` (64-byte prefix + 64-byte-aligned tensor payload + unlimited UTF-8 JSON footer; `VtqFile` also reads version `1`). The [format specification](docs/RU/vtq-format.md), [quantizer](src/vtq.py) and [reference reader and writer](src/vtq_format.py) on this branch describe the current layout; the older LTQ prototype is not its specification.
 
 For KLD evaluation, the [optional native reader](docs/RU/vtq-native-io.md) materializes `VTQ_300` weights on GPU 6.2–8.3× faster than the NumPy reader, with identical FP32 weights on [all eight benchmark models](docs/RU/universal-gate.md). This speeds up loading an existing file, not token generation.
 
