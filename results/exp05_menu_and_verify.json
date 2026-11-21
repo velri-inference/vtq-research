@@ -1,0 +1,325 @@
+{
+  "kronecker_rot": {
+    "max_rel_err": 2.9482603736141755e-07,
+    "ref_ms": 2.83,
+    "fast_ms": 0.39,
+    "speedup": 7.25
+  },
+  "qwen8_matrix_gains_bits": {
+    "sc_1.00": {
+      "VTQ200": 0.0965,
+      "VTQ250": 0.1287,
+      "VTQ300": 0.1174,
+      "VTQ350": 0.152,
+      "VTQ400": 0.1185,
+      "VTQ450": 0.1615,
+      "VTQ500": 0.1263
+    },
+    "sc_1.03": {
+      "VTQ200": 0.0978,
+      "VTQ250": 0.1282,
+      "VTQ300": 0.1169,
+      "VTQ350": 0.1514,
+      "VTQ400": 0.1184,
+      "VTQ450": 0.1604,
+      "VTQ500": 0.1279
+    }
+  },
+  "selected_post_scale": 1.03,
+  "vtq_v2_menu_summary": {
+    "VTQ150_D2": {
+      "bpw_256": 1.589844,
+      "gap_gauss": 0.3686,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.4,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 11.62014
+    },
+    "VTQ150": {
+      "bpw_256": 1.589844,
+      "gap_gauss": 0.2223,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.4,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 9.70668
+    },
+    "VTQ175": {
+      "bpw_256": 1.839844,
+      "gap_gauss": 0.1794,
+      "m_extra": [
+        58,
+        299
+      ],
+      "step": 0.4,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 6.36066
+    },
+    "VTQ200_H0": {
+      "bpw_256": 2.027344,
+      "gap_gauss": 0.1287,
+      "m_extra": [
+        58,
+        299
+      ],
+      "step": 0.0,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 4.53083
+    },
+    "VTQ200": {
+      "bpw_256": 2.089844,
+      "gap_gauss": 0.1263,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.4,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 4.12636
+    },
+    "VTQ225": {
+      "bpw_256": 2.339844,
+      "gap_gauss": 0.132,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.34,
+      "absorbed_sc_g": 0.995,
+      "distortion_ratio": 2.92543
+    },
+    "VTQ250": {
+      "bpw_256": 2.589844,
+      "gap_gauss": 0.1271,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.34,
+      "absorbed_sc_g": 1.02,
+      "distortion_ratio": 2.04338
+    },
+    "VTQ250_H2": {
+      "bpw_256": 2.652344,
+      "gap_gauss": 0.1331,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.02,
+      "distortion_ratio": 1.88945
+    },
+    "VTQ275": {
+      "bpw_256": 2.839844,
+      "gap_gauss": 0.1396,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.34,
+      "absorbed_sc_g": 1.02,
+      "distortion_ratio": 1.4625
+    },
+    "VTQ275_H2": {
+      "bpw_256": 2.902344,
+      "gap_gauss": 0.1395,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.045,
+      "distortion_ratio": 1.33818
+    },
+    "VTQ300_H1": {
+      "bpw_256": 3.089844,
+      "gap_gauss": 0.1341,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.34,
+      "absorbed_sc_g": 1.045,
+      "distortion_ratio": 1.02637
+    },
+    "VTQ300": {
+      "bpw_256": 3.152344,
+      "gap_gauss": 0.1276,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.045,
+      "distortion_ratio": 0.93113
+    },
+    "VTQ325": {
+      "bpw_256": 3.402344,
+      "gap_gauss": 0.1435,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.07,
+      "distortion_ratio": 0.67097
+    },
+    "VTQ350": {
+      "bpw_256": 3.652344,
+      "gap_gauss": 0.1337,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.07,
+      "distortion_ratio": 0.46968
+    },
+    "VTQ375": {
+      "bpw_256": 3.902344,
+      "gap_gauss": 0.1446,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.07,
+      "distortion_ratio": 0.33587
+    },
+    "VTQ400_H2": {
+      "bpw_256": 4.152344,
+      "gap_gauss": 0.1458,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.095,
+      "distortion_ratio": 0.23818
+    },
+    "VTQ400": {
+      "bpw_256": 4.214844,
+      "gap_gauss": 0.1617,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.12,
+      "absorbed_sc_g": 1.07,
+      "distortion_ratio": 0.22317
+    },
+    "VTQ425": {
+      "bpw_256": 4.402344,
+      "gap_gauss": 0.1393,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.095,
+      "distortion_ratio": 0.16683
+    },
+    "VTQ450": {
+      "bpw_256": 4.652344,
+      "gap_gauss": 0.1336,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.095,
+      "distortion_ratio": 0.117
+    },
+    "VTQ475": {
+      "bpw_256": 4.902344,
+      "gap_gauss": 0.1436,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.095,
+      "distortion_ratio": 0.08392
+    },
+    "VTQ500_H2": {
+      "bpw_256": 5.152344,
+      "gap_gauss": 0.1473,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.22,
+      "absorbed_sc_g": 1.12,
+      "distortion_ratio": 0.05965
+    },
+    "VTQ500": {
+      "bpw_256": 5.214844,
+      "gap_gauss": 0.1586,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.12,
+      "absorbed_sc_g": 1.07,
+      "distortion_ratio": 0.05551
+    },
+    "VTQ550": {
+      "bpw_256": 5.714844,
+      "gap_gauss": 0.1665,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.16,
+      "absorbed_sc_g": 1.12,
+      "distortion_ratio": 0.02799
+    },
+    "VTQ575": {
+      "bpw_256": 5.964844,
+      "gap_gauss": 0.174,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.16,
+      "absorbed_sc_g": 1.145,
+      "distortion_ratio": 0.02004
+    },
+    "VTQ600_H2": {
+      "bpw_256": 6.152344,
+      "gap_gauss": 0.1805,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.28,
+      "absorbed_sc_g": 1.195,
+      "distortion_ratio": 0.01564
+    },
+    "VTQ600": {
+      "bpw_256": 6.214844,
+      "gap_gauss": 0.1774,
+      "m_extra": [
+        40,
+        475
+      ],
+      "step": 0.12,
+      "absorbed_sc_g": 1.17,
+      "distortion_ratio": 0.01426
+    }
+  },
+  "container_roundtrip": {
+    "unif_gosset84_bytes": 517136,
+    "unif_gosset84_max_diff": 0.0,
+    "dp_mixed_bytes": 649280,
+    "dp_mixed_max_diff": 0.0,
+    "ring_256_vtq300_rel_mse": 0.014724514447152615,
+    "ring_160_vtq250_rel_mse": 0.032070454210042953
+  }
+}

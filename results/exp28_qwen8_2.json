@@ -1,0 +1,72 @@
+{
+  "family": "qwen8",
+  "order": [
+    "native",
+    "numpy"
+  ],
+  "runs": {
+    "native": {
+      "family": "qwen8",
+      "spec": "VTQ_300",
+      "backend": "native",
+      "source_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 252,
+      "source_keys": 399,
+      "replaced_source_keys": 252,
+      "unchanged_tensors": 147,
+      "unchanged_tensor_bytes": 2489935872,
+      "file_bytes": 5252507392,
+      "sha256": "1821ae0f1b1e984c1305d905e0cfb0d5dca7c8b1e79c1bacb7073c27c16e1cdb",
+      "matrix_writer_s": 4.814718817968242,
+      "quant_plus_matrix_writes_s": 97.31461026200122,
+      "complete_export_fsync_s": 107.18535363200135,
+      "peak_extra_cuda_bytes": 7818459136,
+      "rss_before": {
+        "VmHWM": 1784614912,
+        "VmRSS": 1784614912
+      },
+      "rss_after": {
+        "VmHWM": 4644872192,
+        "VmRSS": 4644872192
+      },
+      "peak_extra_rss": 2860257280
+    },
+    "numpy": {
+      "family": "qwen8",
+      "spec": "VTQ_300",
+      "backend": "numpy",
+      "source_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+      "seed_offset": 13000,
+      "cal_shape": [
+        64,
+        2048
+      ],
+      "matrices": 252,
+      "source_keys": 399,
+      "replaced_source_keys": 252,
+      "unchanged_tensors": 147,
+      "unchanged_tensor_bytes": 2489935872,
+      "file_bytes": 5252507392,
+      "sha256": "1821ae0f1b1e984c1305d905e0cfb0d5dca7c8b1e79c1bacb7073c27c16e1cdb",
+      "matrix_writer_s": 14.586844689962163,
+      "quant_plus_matrix_writes_s": 107.01058254700183,
+      "complete_export_fsync_s": 116.66927683600079,
+      "peak_extra_cuda_bytes": 7818459136,
+      "rss_before": {
+        "VmHWM": 1783238656,
+        "VmRSS": 1783238656
+      },
+      "rss_after": {
+        "VmHWM": 4644974592,
+        "VmRSS": 4644974592
+      },
+      "peak_extra_rss": 2861735936
+    }
+  },
+  "all_file_bytes_equal": true
+}

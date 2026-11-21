@@ -1,12 +1,14 @@
 # VTQ — Velri Trellis Quant
 
-The **[vtq branch](https://github.com/velri-inference/vtq-research/tree/vtq)** contains the current `16×256` trellis weight format, its quantizer and its `.vtq` reader/writer. Start with the [VTQ specification](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/vtq-format.md), [eight-model benchmark results](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/universal-gate.md), or [native loader for KLD evaluation](https://github.com/velri-inference/vtq-research/blob/vtq/docs/RU/vtq-native-io.md). To use that code after cloning, run `git switch vtq`.
+VTQ is a trellis format for quantizing model weights in `16×256` supertiles. The current `.vtq` container uses magic `VTQ\0` and version `2` (64-byte prefix + 64-byte-aligned tensor payload + unlimited UTF-8 JSON footer; `VtqFile` also reads version `1`). The [format specification](docs/RU/vtq-format.md), [quantizer](src/vtq.py) and [reference reader and writer](src/vtq_format.py) on this branch describe the current layout; the older LTQ prototype is not its specification.
 
-This `main` branch preserves the earlier LTQ (*Lumen Trellis Quant*) experiments. The milestones, source paths and commands below refer to that prototype, not the current VTQ layout.
+For KLD evaluation, the [optional native reader](docs/RU/vtq-native-io.md) materializes `VTQ_300` weights on GPU 6.2–8.3× faster than the NumPy reader, with identical FP32 weights on [all eight benchmark models](docs/RU/universal-gate.md). This speeds up loading an existing file, not token generation.
 
 The metric is the same everywhere: mean KL divergence from BF16 with teacher-forced tokens on two traces that take no part in calibration — English Nemotron dialogues (`nem`) and a multilingual ru / zh / de / fr / es trace (`mul`); differences are computed with a paired bootstrap over dialogues.
 
 ## History: GGUF experiments through the LTQ prototype
+
+The milestones below describe earlier formats and their measurements, not the current VTQ layout or its format menu.
 
 Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level tables ≤ 32 entries — `pshufb`), an operation count per 256 weights on par with GGUF, quantization noticeably faster than EXL3 conversion, and quality no worse than EXL3 at the same bitrate.
 
@@ -29,29 +31,33 @@ Constraints from the very start: decoding on GPU **and** on CPU with AVX2 (level
 11. **The LTQ prototype layout was frozen** by the specification and the reference `src/ltq_format.py`: a self-test of 19 tile formats and 17 ring formats — 0 mismatches with the quantizer (`results/ltq_format_selftest.json`).
 12. **Check against third-party quants** (Qwen3.8-27B, `results/q27_report.txt`): at the same bitrate of the decoder linear layers, −46…−49 % KLD vs GSQ-RCO (GGUF, IQ3_XXS / IQ3_S) and −32…−33 % vs EXL3 3.5; against self-calibrated EXL3 3.0 — within noise.
 
-Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration, chat and agents) is closer in domain to the evaluation traces than the competitors' calibration; a check with neutral calibration and an external trace has not been done yet.
+Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration, chat and agents) is closer in domain to the evaluation traces than the competitors' calibration; those comparisons are not neutral-calibration audits. For a separate VTQ result, see the [3B neutral audit](results/vtq_3b_neutral_audit.json).
 
-## Historical code on `main`
+## What's where
 
 | Path | Contents |
 | --- | --- |
-| `src/liqk_v2.py` | quantizer: formats (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices, `.vtq` packing mode (`PACK`) |
+| `src/q4v.py`, [`docs/RU/q4v-prototype.md`](docs/RU/q4v-prototype.md) | **Q4V1**: experimental non-trellis folded 4-D vector format; fast encoder and covariance-aware encoder sharing one byte layout. Not a replacement for VTQ. |
+| `src/vtq.py`, `src/vtq_format.py`, `docs/RU/vtq-format.md` | **VTQ** (*Velri Trellis Quant*, `.vtq`): `16×256` super-tile format, quantizer, `.vtq` container (`VtqWriter` / `VtqFile`), and specification |
+| `src/vtq_native.py`, `src/native/vtq_*tiles.cpp` | Optional CPU codec for the Python writer/reader (`codec=`). [Build/use](docs/RU/vtq-native-io.md) · [Eight-model evidence and limitations](docs/RU/universal-gate.md). Faster FP32 materialization does not mean faster inference matvec. |
+| `src/cpu/vtq_avx2_bench.c`, `src/cuda/vtq_matvec_bench.cu` | **VTQ** single-thread AVX2 and Blackwell `sm_120` FP32 / DP4A GEMV & GEMM decode kernels |
+| `src/liqk_v2.py` | earlier prototype quantizer (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices |
 | `src/tcq_proto.py`, `src/cuda/tcq_viterbi.cu` | Viterbi (torch reference and CUDA), table training, Gaussian rig |
-| `src/ltq_format.py`, `src/ltq_file.py` | format reference (tile, decode, self-test) and the `.vtq` container (write, read, full decode) |
+| `src/ltq_format.py`, `src/ltq_file.py` | Historical LTQ prototype reader, writer and self-tests; use `src/vtq_format.py` for current VTQ files. |
 | `src/hybrid_quant.py`, `src/streaming_quant.py` | layer-wise quantizers and evaluators for models that don't fit on the GPU, with any layer types; comparison with off-the-shelf GGUF and EXL3 |
 | `src/fisher_full.py`, `src/fisher_offload.py` | Fisher row weights |
 | `src/equal_bpw.py` | equal-bitrate comparison (1B, 3B) |
 | `src/cpu/`, `src/cuda/ltq_matvec_bench.cu`, `src/kbench/` | decode speed on CPU and GPU; CUDA C++ vs cuda-oxide |
 | `results/` | raw results (JSON) and summaries |
 
-## Reproducing the historical experiments
+## Running
 
 Python with torch (CUDA) and transformers; the CUDA Viterbi needs `nvcc` in `/usr/local/cuda/bin` (built on first call). EXL3 comparisons need exllamav3 1.6.x (`LUMEN_EXL3_PYTHON`, `LUMEN_EXL3_CONVERT`), GGUF comparisons need a built `libggml-base.so` (`LUMEN_LIBGGML`). Paths to local models and third-party builds default to `~/lm-inference`.
 
 `data/` is not part of the repository: traces and calibration sets are derived from external datasets and are built by `src/prepare_traces.py`; Fisher weights are recomputed by `src/fisher_full.py` / `src/fisher_offload.py`. Models and quants are local as well.
 
 ```bash
-python -m src.ltq_format        # format self-test (requires a GPU)
-python -m src.hybrid_quant --model_dir <bf16> --data_dir data/<model> --fisher data/<model>/fisher.pt \
-    --methods dp:TCQPQ:3.5 --out results/<name>.json
+python -m src.vtq_format        # VTQ format & .vtq container self-test
+python -m src.run_vtq_benchmarks --suite speed
+python -m src.run_vtq_benchmarks --suite 3b
 ```
