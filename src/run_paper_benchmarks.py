@@ -227,18 +227,17 @@ def prepare_neutral_cal_and_traces(
     wt2_cache = work_dir / f"wt2_eval_{tag}.json"
 
     tok = AutoTokenizer.from_pretrained(str(model_dir))
-    bos_id = getattr(tok, "bos_token_id", None)
     if not cal_st.exists() or not cal_txt.exists() or not wt2_cache.exists():
+        # Note: Do NOT prepend `bos_token_id` onto raw non-chat WikiText-2 chunks!
+        # In strict chat/instruct models (e.g. Gemma-4-it where `<bos>` is exclusively followed by `<|turn>`),
+        # `<bos>` without `<|turn>` triggers an invalid pre-turn state (65x PPL spike & corrupted calibration Hessians).
         raw_test = (ROOT / "data" / "wikitext2_test.raw").read_text(encoding="utf-8")
         test_ids = tok.encode(raw_test, add_special_tokens=False)
         eval_seqs = []
-        step_len = 511 if bos_id is not None else 512
         for i in range(40):
-            seg = test_ids[i * step_len : (i + 1) * step_len]
+            seg = test_ids[i * 512 : (i + 1) * 512]
             if len(seg) < 128:
                 break
-            if bos_id is not None:
-                seg = [int(bos_id)] + seg
             eval_seqs.append({"id": f"wt2_{i}", "token_ids": seg, "score_spans": [[64, len(seg)]]})
         wt2_cache.write_text(json.dumps({"sequences": eval_seqs}), encoding="utf-8")
 
@@ -247,16 +246,10 @@ def prepare_neutral_cal_and_traces(
         articles = [t.strip() for t in ds_train["text"] if t and len(t.strip()) > 60]
         train_text = "\n\n".join(articles)
         train_ids = tok.encode(train_text, add_special_tokens=False)
-        row_step = (cal_seq_len - 1) if bos_id is not None else cal_seq_len
-        need = n_cal_rows * row_step
+        need = n_cal_rows * cal_seq_len
         if len(train_ids) < need:
             train_ids = (train_ids * ((need // len(train_ids)) + 2))[:need]
-        cal_rows = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, row_step)
-        if bos_id is not None:
-            bos_col = torch.full((n_cal_rows, 1), int(bos_id), dtype=torch.long)
-            cal_ids = torch.cat([bos_col, cal_rows], dim=1).contiguous()
-        else:
-            cal_ids = cal_rows.contiguous()
+        cal_ids = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, cal_seq_len).contiguous()
         save_file({"input_ids": cal_ids}, str(cal_st))
 
         # Exact decoded text of those 64 x 2048 chunks for `llama-imatrix`
@@ -903,8 +896,9 @@ def quantize_and_export_vtq_full(
     total_params = info["total_text_params"]
     emb_spec, head_spec = choose_vtq_embed_head_specs(target_bpw)
     if ev.tie_word_embeddings:
-        # Single shared table serves both lookup and output logits: allocate slightly richer spec
-        emb_spec = {"VTQ_225": "VTQ_275_H2", "VTQ_325": "VTQ_375", "VTQ_425": "VTQ_475", "VTQ_600": "VTQ_600"}[emb_spec]
+        # Single shared table serves both scaled lookup (`* sqrt(H)`) and full-vocab `lm_head` logits:
+        # match `head_spec` tier (`>= 3.75 bpw`) while deducting exact bytes from decoder linear DP budget!
+        emb_spec = {"VTQ_225": "VTQ_375", "VTQ_325": "VTQ_450", "VTQ_425": "VTQ_550", "VTQ_600": "VTQ_600"}[emb_spec]
 
     def _matrix_bytes(M: int, K: int, sp_name: str) -> int:
         M_p = ((M + 15) // 16) * 16
@@ -1238,10 +1232,23 @@ class GgufDiskLoader:
         self.nv = getattr(config, "linear_num_value_heads", 1)
         self.dk = getattr(config, "linear_key_head_dim", 0)
         self.dv = getattr(config, "linear_value_head_dim", 0)
-        self.nq = getattr(config, "num_attention_heads", 1)
-        self.nkv = getattr(config, "num_key_value_heads", 1)
-        self.ngkv = getattr(config, "num_global_key_value_heads", self.nkv)
         self._perm_cache: Dict[str, int] = {}
+
+    def _layer_nq(self, l_idx: int) -> int:
+        plc = getattr(self.config, "per_layer_config", None)
+        if plc is not None:
+            return int(plc[l_idx].num_attention_heads)
+        return int(getattr(self.config, "num_attention_heads", 1))
+
+    def _layer_nkv_cands(self, l_idx: int) -> set:
+        plc = getattr(self.config, "per_layer_config", None)
+        if plc is not None:
+            return {int(plc[l_idx].num_key_value_heads)}
+        out = {int(getattr(self.config, "num_key_value_heads", 1))}
+        ng = getattr(self.config, "num_global_key_value_heads", None)
+        if ng is not None:
+            out.add(int(ng))
+        return out
 
     def close(self):
         del self.mm
@@ -1277,16 +1284,17 @@ class GgufDiskLoader:
                 ref = mod.weight.data
                 cands = [W]
                 if nm == "self_attn.q_proj":
-                    cands.append(gguf_utils.unpermute_qk(W, self.nq))
+                    nq_l = self._layer_nq(l_idx)
+                    cands.append(gguf_utils.unpermute_qk(W, nq_l))
                     if getattr(self.config, "attn_output_gate", False):
-                        hd = W.shape[0] // (2 * self.nq)
+                        hd = W.shape[0] // (2 * nq_l)
                         # Qwen3.5/3.6 gated attention: GGUF may interleave [nq, 2, hd, K] vs [2, nq, hd, K]
-                        w_deint = W.view(self.nq, 2, hd, W.shape[1]).transpose(0, 1).reshape_as(W).contiguous()
+                        w_deint = W.view(nq_l, 2, hd, W.shape[1]).transpose(0, 1).reshape_as(W).contiguous()
                         cands.append(w_deint)
                         q_p, g_p = w_deint.chunk(2, dim=0)
-                        cands.append(torch.cat([gguf_utils.unpermute_qk(q_p, self.nq), g_p], dim=0))
+                        cands.append(torch.cat([gguf_utils.unpermute_qk(q_p, nq_l), g_p], dim=0))
                 elif nm == "self_attn.k_proj":
-                    for nh_cand in {self.nkv, self.ngkv}:
+                    for nh_cand in self._layer_nkv_cands(l_idx):
                         if nh_cand > 0 and W.shape[0] % (2 * nh_cand) == 0:
                             cands.append(gguf_utils.unpermute_qk(W, nh_cand))
                 elif self.nv != self.nk:
