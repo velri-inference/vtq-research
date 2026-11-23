@@ -1659,13 +1659,18 @@ def run_gguf_phase(
     if not bf16_gguf.exists():
         print(f"\n=== [GGUF] Converting {model_dir.name} to BF16 GGUF ===", flush=True)
         t_c = time.perf_counter()
-        subprocess.run(
-            [
-                sys.executable, str(llama_cpp_dir / "convert_hf_to_gguf.py"),
-                str(model_dir), "--outtype", "bf16", "--no-mtp", "--outfile", str(bf16_gguf),
-            ],
-            check=True,
-        )
+        has_mtp = any(k.startswith("mtp.") for k in ev.store.keys())
+        base_cmd = [
+            sys.executable, str(llama_cpp_dir / "convert_hf_to_gguf.py"),
+            str(model_dir), "--outtype", "bf16", "--outfile", str(bf16_gguf),
+        ]
+        if has_mtp:
+            rc_mtp = subprocess.run([*base_cmd, "--no-mtp"])
+            if rc_mtp.returncode != 0:
+                bf16_gguf.unlink(missing_ok=True)
+                subprocess.run(base_cmd, check=True)
+        else:
+            subprocess.run(base_cmd, check=True)
         print(f"  Converted BF16 GGUF ({bf16_gguf.stat().st_size / (1<<30):.2f} GiB) in {time.perf_counter()-t_c:.1f}s", flush=True)
 
     # Verify BF16 GGUF layer-0 + first full_attention layer + embed/head tensor mapping is bit-exact!
@@ -1737,8 +1742,13 @@ def run_gguf_phase(
 
     for preset in todo:
         q_p, q_sec = q_paths[preset]
-        file_bytes = q_p.stat().st_size
+        raw_file_bytes = q_p.stat().st_size
         loader = GgufDiskLoader(q_p, shim, ev.config)
+        non_text_bytes = sum(
+            v["n_bytes"] for k, v in loader.tensors.items()
+            if k.startswith(("v.", "mm.", "mtp.", "nextn."))
+        )
+        file_bytes = raw_file_bytes - non_text_bytes
         lin_bytes = sum(
             v["n_bytes"] for k, v in loader.tensors.items()
             if k.startswith("blk.") and any(tag in k for tag in ("attn_q", "attn_k", "attn_v", "attn_output", "attn_gate", "ssm_out", "ffn_gate.", "ffn_up.", "ffn_down.", "_shexp.", "_exps.weight"))
