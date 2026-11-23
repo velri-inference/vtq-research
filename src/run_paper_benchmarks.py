@@ -236,7 +236,7 @@ def prepare_neutral_cal_and_traces(
             if len(seg) < 128:
                 break
             eval_seqs.append({"id": f"wt2_{i}", "token_ids": seg, "score_spans": [[64, len(seg)]]})
-        wt2_cache.write_text(json.dumps(eval_seqs), encoding="utf-8")
+        wt2_cache.write_text(json.dumps({"sequences": eval_seqs}), encoding="utf-8")
 
         from datasets import load_dataset
         ds_train = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
@@ -293,9 +293,11 @@ class StreamingCausalEvaluator:
         if not self.store.has("lm_head.weight"):
             self.tie_word_embeddings = True
 
-        # Materialize norm & rotary_emb on GPU; embed_tokens & lm_head loaded on demand or resident
-        hqm._load_module(self.tm.embed_tokens, f"{self.prefix}.embed_tokens", self.store, device)
-        hqm._load_module(self.tm.norm, f"{self.prefix}.norm", self.store, device)
+        # Materialize all non-layer top-level children of `self.tm` (just like `hybrid_quant.TextModel`)
+        for name, mod in self.tm.named_children():
+            if name in ("layers", "rotary_emb"):
+                continue
+            hqm._load_module(mod, f"{self.prefix}.{name}", self.store, "cpu" if name == "embed_tokens_per_layer" else device)
         with torch.device(device):
             self.tm.rotary_emb = type(self.tm.rotary_emb)(config=self.config)
         if self.tie_word_embeddings:
@@ -921,16 +923,21 @@ def quantize_and_export_vtq_full(
 
     target_total_bytes = target_bpw * total_params / 8.0
     avail_dec_tile_bytes = target_total_bytes - emb_bytes - head_bytes - unchanged_bytes - dec_scale_bytes
-    # Note: `LIQK_V2_SPECS[sp].bpw` includes `+2.0 / 256 = 0.0078125` bpw for `d_row`, so match its definition:
-    dp_target_bpw = (avail_dec_tile_bytes * 8.0 / max(dec_padded_params, 1)) + (2.0 * 8.0 / 256.0)
+    # Note: `LIQK_V2_SPECS[sp].bpw` includes `+2.0 / 256.0 = 0.0078125` bpw for `d_row`, so match its definition:
+    dp_target_bpw = (avail_dec_tile_bytes * 8.0 / max(dec_padded_params, 1)) + (2.0 / 256.0)
     dp_target_bpw = max(min(dp_target_bpw, 6.22), 1.61)
 
     cands = vtq.vtq_candidates_for_target(dp_target_bpw, vtq.VTQ_MENU)
-    dp_res = lv2.solve_fisher_slice_dp(profile, target_bpw=dp_target_bpw, candidate_specs=cands)
-    assignment = dp_res["assignment"]
+    assignment = lv2.solve_fisher_slice_dp(profile, target_bpw=dp_target_bpw, candidate_specs=cands)
+    ach_bits = sum(
+        (r1 - r0) * (next(s["params"] // (s["r1"] - s["r0"]) for s in profile["slices"] if s["layer"] == k[0] and s["subname"] == k[1]))
+        * lv2.LIQK_V2_SPECS[sp].bpw
+        for k, sls in assignment.items() for r0, r1, sp in sls
+    )
+    ach_bpw = ach_bits / max(dec_padded_params, 1)
 
     print(
-        f"\n=== [VTQ {target_bpw:.2f} bpw] DP target={dp_target_bpw:.4f} (achieved={dp_res['achieved_bpw']:.4f}) | "
+        f"\n=== [VTQ {target_bpw:.2f} bpw] DP target={dp_target_bpw:.4f} (achieved={ach_bpw:.4f}) | "
         f"emb={emb_spec} head={'TIED' if ev.tie_word_embeddings else head_spec} ===",
         flush=True,
     )
@@ -1655,19 +1662,27 @@ def run_gguf_phase(
         subprocess.run(
             [
                 sys.executable, str(llama_cpp_dir / "convert_hf_to_gguf.py"),
-                str(model_dir), "--outtype", "bf16", "--outfile", str(bf16_gguf),
+                str(model_dir), "--outtype", "bf16", "--no-mtp", "--outfile", str(bf16_gguf),
             ],
             check=True,
         )
         print(f"  Converted BF16 GGUF ({bf16_gguf.stat().st_size / (1<<30):.2f} GiB) in {time.perf_counter()-t_c:.1f}s", flush=True)
 
-    # Verify BF16 GGUF layer-0 + embed/head tensor mapping is bit-exact (`rel_err < 1e-5`)!
+    # Verify BF16 GGUF layer-0 + first full_attention layer + embed/head tensor mapping is bit-exact!
     print("  [GGUF] Verifying BF16 GGUF -> PyTorch tensor bijection...", flush=True)
     bf_loader = GgufDiskLoader(bf16_gguf, shim, ev.config)
     bf_loader.load_embed_and_head(ev)
-    lay0 = ev.load_layer_bf16(0)
-    bf_loader.load_layer(lay0, 0, ev.device)
-    ev.release_layer(0)
+    verify_layers = {0}
+    ltypes = getattr(ev.config, "layer_types", None) or []
+    for li, lt in enumerate(ltypes):
+        if lt == "full_attention":
+            verify_layers.add(li)
+            break
+    for li in sorted(verify_layers):
+        if li < ev.n_layers:
+            lay_v = ev.load_layer_bf16(li)
+            bf_loader.load_layer(lay_v, li, ev.device)
+            ev.release_layer(li)
     bf_loader.close()
     ev.restore_clean_embed_and_head()
     torch.cuda.empty_cache()
