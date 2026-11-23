@@ -39,6 +39,7 @@ Caveat for items 9 and 12: the calibration (Qwen3.8-Flash-Next self-calibration,
 | --- | --- |
 | `src/q4v.py` | **Q4V1**: experimental non-trellis folded 4-D vector format; fast encoder and covariance-aware encoder sharing one byte layout. Not a replacement for VTQ. |
 | `src/vtq.py`, `src/vtq_format.py`, [`docs/EN/vtq-format.md`](docs/EN/vtq-format.md) ([RU](docs/RU/vtq-format.md)) | **VTQ** (*Velri Trellis Quant*, `.vtq`): `16×256` super-tile format, quantizer, `.vtq` container (`VtqWriter` / `VtqFile`), and specification |
+| [`docs/EN/paper-benchmarks.md`](docs/EN/paper-benchmarks.md) ([RU](docs/RU/paper-benchmarks.md)), `docs/figures/` | End-to-end neutral-calibration KLD & Perplexity Pareto charts and tables (`VTQ` vs `EXL3` vs `GGUF`) |
 | `src/vtq_native.py`, `src/native/vtq_*tiles.cpp` | Optional CPU codec for the Python writer/reader (`codec=`). [Build/use](docs/EN/vtq-native-io.md) ([RU](docs/RU/vtq-native-io.md)). Faster FP32 materialization does not mean faster inference matvec. |
 | `src/cpu/vtq_avx2_bench.c`, `src/cuda/vtq_matvec_bench.cu` | **VTQ** single-thread AVX2 and Blackwell `sm_120` FP32 / DP4A GEMV & GEMM decode kernels |
 | `src/liqk_v2.py` | earlier prototype quantizer (`TCQ_CONFIG`, `LIQK_V2_SPECS`), LDLQ, profile and DP over row slices |
