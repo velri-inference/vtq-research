@@ -598,6 +598,34 @@ def resolve_rot_block(subname: Optional[str], rot_block: int = -1, rot_mode: str
     return rot_block
 
 
+def pad_wh_to_supertile(
+    W: torch.Tensor,
+    H: torch.Tensor,
+    row_weights: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Tuple[int, int]]:
+    """Zero-pads `W [M_orig, K_orig]` and `H [K_orig, K_orig]` to `(M_pad % 16 == 0, K_pad % 256 == 0)` when needed."""
+    M_orig, K_orig = W.shape
+    M_pad = ((M_orig + SUPER_ROWS - 1) // SUPER_ROWS) * SUPER_ROWS
+    K_pad = ((K_orig + TILE - 1) // TILE) * TILE
+    if M_pad == M_orig and K_pad == K_orig:
+        return W, H, row_weights, (M_orig, K_orig)
+    W_pad = F.pad(W.float(), (0, K_pad - K_orig, 0, M_pad - M_orig))
+    H_f = H.float()
+    if K_pad != K_orig:
+        H_pad = torch.zeros((K_pad, K_pad), dtype=torch.float32, device=H.device)
+        H_pad[:K_orig, :K_orig] = H_f
+        dmean = float(H_f.diagonal().mean().clamp(min=1e-8).item())
+        H_pad[K_orig:, K_orig:].diagonal().fill_(0.05 * dmean)
+    else:
+        H_pad = H_f
+    rw_pad = row_weights
+    if row_weights is not None and M_pad != M_orig:
+        rw_f = row_weights.float()
+        pad_val = float(rw_f.mean().clamp(min=1e-12).item()) * 0.1
+        rw_pad = F.pad(rw_f, (0, M_pad - M_orig), value=pad_val)
+    return W_pad, H_pad, rw_pad, (M_orig, K_orig)
+
+
 @torch.no_grad()
 def quantize_matrix_vtq(
     W: torch.Tensor,
@@ -613,7 +641,7 @@ def quantize_matrix_vtq(
     compact_wide_workspace: bool = False,
     row_energy_tilt: float = 0.,
 ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, float]:
-    """Quantizes `W [M, Kin]` (`Kin % 256 == 0`) into VTQ with bit-exact `assemble_vtq` output."""
+    """Quantizes `W [M, Kin]` into VTQ (auto-padding to `(16, 256)` supertile multiples if needed)."""
     if not VTQ_CONFIG:
         load_and_register_vtq()
     if d_sb_gecd_sweeps is not None:
@@ -622,8 +650,9 @@ def quantize_matrix_vtq(
         u_sb_gecd_sweeps = int(os.environ.get("VTQ_GS_SWEEPS", "0"))
 
     dev = W.device
-    W_src = (W_target if W_target is not None else W).float()
-    H_f32 = H.float()
+    W_src_unpad = (W_target if W_target is not None else W).float()
+    H_f32_unpad = H.float()
+    W_src, H_f32, row_weights, orig_shape = pad_wh_to_supertile(W_src_unpad, H_f32_unpad, row_weights)
     M, Kin = W_src.shape
     assert Kin % TILE == 0, f"VTQ requires Kin % 256 == 0, got Kin={Kin}"
     nblocks = Kin // TILE
@@ -680,6 +709,9 @@ def quantize_matrix_vtq(
         }
 
     row_slices = [(0, M, spec_or_row_specs)] if isinstance(spec_or_row_specs, str) else list(spec_or_row_specs)
+    if row_slices and row_slices[-1][1] < M:
+        r0_last, _, sp_last = row_slices[-1]
+        row_slices[-1] = (r0_last, M, sp_last)
     by_spec: Dict[str, List[Tuple[int, int]]] = {}
     for r0, r1, sp in row_slices:
         by_spec.setdefault(sp, []).append((r0, r1))
@@ -816,6 +848,8 @@ def quantize_matrix_vtq(
             "rot_block": rot_block,
             "W_hat_rot": W_rot_hat,
         }
+        if orig_shape != (M, Kin):
+            pack_dict["orig_shape"] = [int(orig_shape[0]), int(orig_shape[1])]
         if PACK is not None:
             PACK["matrix"] = pack_dict
         if lv2.PACK is not None:
@@ -823,8 +857,19 @@ def quantize_matrix_vtq(
 
     diff = W_src - W_hat_eff
     rel_loss = float(((HW - HQ) * diff).sum().item()) / float((HW * W_src).sum().clamp(min=1e-12).item())
-    qdata = {"d_row": d_row_all, "u_sb": u_sb_all, "suh": suh_fp16, "row_slices": row_slices, "rot_block": rot_block}
-    return qdata, W_hat_eff, rel_loss
+    qdata: Dict[str, object] = {
+        "d_row": d_row_all,
+        "u_sb": u_sb_all,
+        "suh": suh_fp16,
+        "row_slices": row_slices,
+        "rot_block": rot_block,
+    }
+    if orig_shape != (M, Kin):
+        qdata["orig_shape"] = [int(orig_shape[0]), int(orig_shape[1])]
+        W_hat_out = W_hat_eff[: orig_shape[0], : orig_shape[1]].contiguous()
+    else:
+        W_hat_out = W_hat_eff
+    return qdata, W_hat_out, rel_loss
 
 
 # =================================================================================================
@@ -1346,17 +1391,23 @@ def profile_matrix_vtq(
     """Profiles per-slice Fisher-weighted distortion under VTQ preconditioning (`suh` + `Outer-DCT` / `FWHT-256`)."""
     dev = W.device
     rw = s_row.to(dev).float() if s_row is not None else None
+    W_p, H_p, rw_p, (M_orig, _) = pad_wh_to_supertile(W.float(), H.float(), rw)
     rb = resolve_rot_block(full, rot_block=rot_block, rot_mode=rot_mode)
-    W_rot, H_rot, _ = compute_suh_vtq(W.float(), H.float(), seed=seed, row_weights=rw, rot_block=rb)
+    W_rot, H_rot, _ = compute_suh_vtq(W_p, H_p, seed=seed, row_weights=rw_p, rot_block=rb)
     diag_h = torch.diagonal(H_rot).clamp(min=1e-8)
     diff = W_rot - lv2.quantize_liqk_v2_diag_rot(W_rot, diag_h, "LIQK3_V2")
     row_err = ((diff @ H_rot) * diff).sum(dim=1).clamp(min=1e-12)
-    M, K = W.shape
-    if rw is not None:
-        row_err = row_err * rw
-    for i, v in enumerate((0.5 * row_err).view(M // step, step).sum(dim=1).tolist()):
+    M_p, K_p = W_p.shape
+    if rw_p is not None:
+        row_err = row_err * rw_p
+    step_eff = math.gcd(M_p, step) if (M_p % step != 0) else step
+    for i, v in enumerate((0.5 * row_err).view(M_p // step_eff, step_eff).sum(dim=1).tolist()):
+        r0 = i * step_eff
+        r1 = min((i + 1) * step_eff, M_orig)
+        if r0 >= M_orig:
+            break
         slices.append(
-            {"layer": l_idx, "subname": full, "r0": i * step, "r1": (i + 1) * step, "params": step * K, "raw_kld3": v}
+            {"layer": l_idx, "subname": full, "r0": r0, "r1": (i + 1) * step_eff, "params": step_eff * K_p, "raw_kld3": v}
         )
 
 

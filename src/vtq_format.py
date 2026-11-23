@@ -657,6 +657,8 @@ class VtqWriter:
         d_row_np = d_row_t.detach().cpu().to(torch.float16).numpy()
         K = c_np.shape[1] * TILE
         rot_block = int(m.get("rot_block", -1))
+        orig_shape = m.get("orig_shape")
+        has_pad = orig_shape is not None and (int(orig_shape[0]) != int(c_np.shape[0]) or int(orig_shape[1]) != K)
 
         blobs, meta, off = [], [], 0
         for r0, r1, name in m["row_slices"]:
@@ -665,7 +667,10 @@ class VtqWriter:
             b = self._pack_tiles(c_np[r0:r1], u_np[r0:r1], g_np[r0:r1], usb_np[r0:r1], fmt).tobytes()
             pad = (-len(b)) & 63
             blobs.append(b + b"\0" * pad)
-            meta.append([r0, r1, fi, off, rot_block])
+            if has_pad:
+                meta.append([r0, r1, fi, off, rot_block, int(orig_shape[0]), int(orig_shape[1])])
+            else:
+                meta.append([r0, r1, fi, off, rot_block])
             off += len(b) + pad
             if verify and "W_hat_rot" in m:
                 dec = decode_supertiles_vtq(b, r1 - r0, K, fmt, d_row=d_row_np[r0:r1])
@@ -675,7 +680,7 @@ class VtqWriter:
                     raise AssertionError(f"{prefix} [{r0}:{r1}] {name}: supertile decode mismatch max_diff={mx}")
 
         self.add_bytes(f"{prefix}.vtq.data", b"".join(blobs), "u8", [off])
-        self.add_bytes(f"{prefix}.vtq.slices", np.array(meta, dtype=np.int32), "i32", [len(meta), 5])
+        self.add_bytes(f"{prefix}.vtq.slices", np.array(meta, dtype=np.int32), "i32", [len(meta), 7 if has_pad else 5])
         self.add_tensor(f"{prefix}.vtq.d_row", d_row_t.to(torch.float16))
         self.add_tensor(f"{prefix}.vtq.suh", m["suh"].to(torch.float16))
 
@@ -803,7 +808,10 @@ class VtqFile:
             nbytes = nbg * (K // TILE) * fmt.st_bytes
             dec_np = self._unpack_tiles(data[off : off + nbytes], r1 - r0, K, fmt, d_row=d_row[r0:r1])
             W_rot[r0:r1] = torch.from_numpy(dec_np).to(device)
-        return apply_vtq_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
+        out = apply_vtq_rot(W_rot, rot_block=rot_block, transpose=True) * suh.float().unsqueeze(0)
+        if len(slices[0]) >= 7:
+            out = out[: int(slices[0][5]), : int(slices[0][6])].contiguous()
+        return out
 
 
 # ------------------------------------------------------------------------------------------------
