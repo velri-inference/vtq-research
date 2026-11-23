@@ -32,18 +32,38 @@ CHAT_FORMAT = "llama3"
 FORCE_BOS_ID = None
 
 
-def clean_qwen_chat_markers(text: str) -> str:
+def clean_qwen_chat_markers(
+    text: str,
+    *,
+    is_first_seg: bool = False,
+    has_real_think: bool = False,
+    is_prompt_before_span: bool = False,
+) -> str:
     """
     Replaces Qwen template special markers (`<|im_start|>role\\n`, `<|im_end|>`)
-    with the Llama-3 format (`<|start_header_id|>role<|end_header_id|>\\n\\n`, `<|eot_id|>`)
-    so that the model sees its native dialogue markup.
+    with the target model's native dialogue & reasoning channel markup.
     """
     if CHAT_FORMAT == "qwen":
         return text
     if CHAT_FORMAT == "gemma4":
         text = re.sub(r"<\|im_start\|>assistant\n", "<|turn>model\n", text)
         text = re.sub(r"<\|im_start\|>(system|user|tool)\n", r"<|turn>\1\n", text)
-        return text.replace("<|im_end|>", "<turn|>")
+        text = text.replace("<|im_end|>", "<turn|>")
+        if is_first_seg and has_real_think:
+            if text.startswith("<|turn>system\n"):
+                text = "<|turn>system\n<|think|>\n" + text[len("<|turn>system\n") :]
+            else:
+                text = "<|turn>system\n<|think|>\n<turn|>\n" + text
+        if is_prompt_before_span:
+            text = re.sub(
+                r"(<\|turn>model\n)\s*<think>\s*</think>\s*$",
+                r"\1<|channel>thought\n<channel|>",
+                text,
+            )
+        text = re.sub(r"<think>\s*</think>\s*", "", text)
+        text = re.sub(r"<think>\n?", "<|channel>thought\n", text)
+        text = re.sub(r"\n?</think>[ \t]*\n*", "\n<channel|>", text)
+        return text
     text = re.sub(
         r"<\|im_start\|>(system|user|assistant|tool)\n",
         r"<|start_header_id|>\1<|end_header_id|>\n\n",
@@ -82,6 +102,9 @@ def convert_eval_trace(
         if not spans:
             continue
 
+        full_q_txt = qwen_tok.decode(seq, skip_special_tokens=False)
+        has_real_think = bool(re.search(r"<think>(?!\s*</think>)", full_q_txt))
+
         # Split the sequence into alternating unscored and scored segments,
         # decode each segment with the Qwen tokenizer, strip the templated <think> and encode with the target tokenizer
         cursor = 0
@@ -89,19 +112,33 @@ def convert_eval_trace(
         target_spans: List[List[int]] = []
 
         for a, b in spans:
-            if a > cursor:
-                unscored_txt = qwen_tok.decode(seq[cursor:a], skip_special_tokens=False)
-                unscored_txt = clean_qwen_chat_markers(unscored_txt)
-                target_ids.extend(target_tok.encode(unscored_txt, add_special_tokens=(cursor == 0)))
-                if cursor == 0 and FORCE_BOS_ID is not None and target_ids[:1] != [FORCE_BOS_ID]:
-                    target_ids.insert(0, FORCE_BOS_ID)
-
             scored_txt = qwen_tok.decode(seq[a:b], skip_special_tokens=False)
             think_prefix, clean_scored = strip_forced_think_prefix(scored_txt)
-            if think_prefix:
-                target_ids.extend(target_tok.encode(clean_qwen_chat_markers(think_prefix), add_special_tokens=False))
+            unscored_raw = (qwen_tok.decode(seq[cursor:a], skip_special_tokens=False) if a > cursor else "") + think_prefix
+            if unscored_raw:
+                unscored_txt = clean_qwen_chat_markers(
+                    unscored_raw,
+                    is_first_seg=(cursor == 0),
+                    has_real_think=has_real_think,
+                    is_prompt_before_span=True,
+                )
+                target_ids.extend(
+                    target_tok.encode(
+                        unscored_txt,
+                        add_special_tokens=(cursor == 0 and CHAT_FORMAT != "gemma4"),
+                    )
+                )
+                if cursor == 0 and FORCE_BOS_ID is not None and target_ids[:1] != [FORCE_BOS_ID]:
+                    target_ids.insert(0, FORCE_BOS_ID)
+            elif cursor == 0 and FORCE_BOS_ID is not None:
+                target_ids.append(FORCE_BOS_ID)
 
-            clean_scored = clean_qwen_chat_markers(clean_scored)
+            clean_scored = clean_qwen_chat_markers(
+                clean_scored,
+                is_first_seg=False,
+                has_real_think=has_real_think,
+                is_prompt_before_span=False,
+            )
             scored_seg_ids = target_tok.encode(clean_scored, add_special_tokens=False)
             if scored_seg_ids:
                 s_start = len(target_ids)
@@ -111,7 +148,12 @@ def convert_eval_trace(
             cursor = b
 
         if cursor < len(seq):
-            tail_txt = clean_qwen_chat_markers(qwen_tok.decode(seq[cursor:], skip_special_tokens=False))
+            tail_txt = clean_qwen_chat_markers(
+                qwen_tok.decode(seq[cursor:], skip_special_tokens=False),
+                is_first_seg=False,
+                has_real_think=has_real_think,
+                is_prompt_before_span=False,
+            )
             target_ids.extend(target_tok.encode(tail_txt, add_special_tokens=False))
 
         # If the row is longer than max_seq_len, carefully truncate it from the end or skip empty spans

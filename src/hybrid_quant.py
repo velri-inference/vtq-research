@@ -88,7 +88,7 @@ def _load_module(mod: nn.Module, prefix: str, store: TensorStore, device):
             raise KeyError(f"{key} not found in checkpoint")
     for m in mod.modules():
         if hasattr(m, "scalar_embed_scale"):
-            m.embed_scale = torch.tensor(m.scalar_embed_scale, device=device)
+            m.embed_scale = torch.tensor(m.scalar_embed_scale, dtype=torch.bfloat16, device=device)
 
 
 class TextModel:
@@ -98,6 +98,8 @@ class TextModel:
         self.device = device
         config = AutoConfig.from_pretrained(str(model_dir))
         self.config = getattr(config, "text_config", config)
+        if getattr(self.config, "_experts_implementation", None) is None:
+            self.config._experts_implementation = "grouped_mm"
         with torch.device("meta"):
             self.model = AutoModelForCausalLM.from_config(self.config, dtype=torch.bfloat16, attn_implementation="sdpa")
         self.model.eval()

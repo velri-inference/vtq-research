@@ -227,18 +227,26 @@ def prepare_neutral_cal_and_traces(
     wt2_cache = work_dir / f"wt2_eval_{tag}.json"
 
     tok = AutoTokenizer.from_pretrained(str(model_dir))
+    is_gemma4 = "gemma-4" in model_dir.name.lower() or "gemma4" in model_dir.name.lower()
     if not cal_st.exists() or not cal_txt.exists() or not wt2_cache.exists():
-        # Note: Do NOT prepend `bos_token_id` onto raw non-chat WikiText-2 chunks!
-        # In strict chat/instruct models (e.g. Gemma-4-it where `<bos>` is exclusively followed by `<|turn>`),
-        # `<bos>` without `<|turn>` triggers an invalid pre-turn state (65x PPL spike & corrupted calibration Hessians).
+        # Note: In strict Gemma-4-it models, `<bos>` without `<|turn>` triggers an invalid pre-turn state,
+        # while omitting `<bos>` altogether removes the position-0 attention sink. Prepending Gemma-4's native
+        # 8-token empty-thought model turn header (`<bos><|turn>model\n<|channel>thought\n<channel|>`) gives
+        # clean in-distribution activations (~11 PPL on WikiText-2) while scoring the exact same 448 text tokens!
+        g4_hdr = (
+            tok.encode("<bos><|turn>model\n<|channel>thought\n<channel|>", add_special_tokens=False)
+            if is_gemma4
+            else []
+        )
         raw_test = (ROOT / "data" / "wikitext2_test.raw").read_text(encoding="utf-8")
         test_ids = tok.encode(raw_test, add_special_tokens=False)
         eval_seqs = []
         for i in range(40):
-            seg = test_ids[i * 512 : (i + 1) * 512]
-            if len(seg) < 128:
+            body = test_ids[i * 512 : (i + 1) * 512]
+            if len(body) < 128:
                 break
-            eval_seqs.append({"id": f"wt2_{i}", "token_ids": seg, "score_spans": [[64, len(seg)]]})
+            seg = g4_hdr + body
+            eval_seqs.append({"id": f"wt2_{i}", "token_ids": seg, "score_spans": [[len(g4_hdr) + 64, len(seg)]]})
         wt2_cache.write_text(json.dumps({"sequences": eval_seqs}), encoding="utf-8")
 
         from datasets import load_dataset
@@ -246,15 +254,26 @@ def prepare_neutral_cal_and_traces(
         articles = [t.strip() for t in ds_train["text"] if t and len(t.strip()) > 60]
         train_text = "\n\n".join(articles)
         train_ids = tok.encode(train_text, add_special_tokens=False)
-        need = n_cal_rows * cal_seq_len
+        row_body_len = cal_seq_len - len(g4_hdr)
+        need = n_cal_rows * row_body_len
         if len(train_ids) < need:
             train_ids = (train_ids * ((need // len(train_ids)) + 2))[:need]
-        cal_ids = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, cal_seq_len).contiguous()
+        if g4_hdr:
+            rows_list = [
+                g4_hdr + train_ids[r * row_body_len : (r + 1) * row_body_len]
+                for r in range(n_cal_rows)
+            ]
+            cal_ids = torch.tensor(rows_list, dtype=torch.long).contiguous()
+        else:
+            cal_ids = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, cal_seq_len).contiguous()
         save_file({"input_ids": cal_ids}, str(cal_st))
 
-        # Exact decoded text of those 64 x 2048 chunks for `llama-imatrix`
-        decoded_chunks = [tok.decode(cal_ids[r].tolist(), skip_special_tokens=True) for r in range(n_cal_rows)]
-        cal_txt.write_text("\n\n".join(decoded_chunks), encoding="utf-8")
+        # Decoded text of those 64 x 2048 chunks for `llama-imatrix`
+        decoded_chunks = [tok.decode(cal_ids[r, len(g4_hdr):].tolist(), skip_special_tokens=True) for r in range(n_cal_rows)]
+        txt_body = "\n\n".join(decoded_chunks)
+        if is_gemma4:
+            txt_body = "<|turn>model\n<|channel>thought\n<channel|>" + txt_body
+        cal_txt.write_text(txt_body, encoding="utf-8")
         print(f"=== Prepared neutral WikiText-2 calibration ({n_cal_rows}x{cal_seq_len}) -> {cal_st.name} ===", flush=True)
 
     traces: Dict[str, List[Tuple[torch.Tensor, List[int], List[int]]]] = {}
@@ -284,6 +303,8 @@ class StreamingCausalEvaluator:
         self.device = device
         full_cfg = AutoConfig.from_pretrained(str(model_dir))
         self.config = getattr(full_cfg, "text_config", full_cfg)
+        if getattr(self.config, "_experts_implementation", None) is None:
+            self.config._experts_implementation = "grouped_mm"
         with torch.device("meta"):
             self.model = AutoModelForCausalLM.from_config(self.config, dtype=torch.bfloat16, attn_implementation="sdpa")
         self.model.eval()
@@ -379,7 +400,7 @@ class StreamingCausalEvaluator:
                 raise KeyError(f"{full_k} not found in checkpoint")
         for m in layer.modules():
             if hasattr(m, "scalar_embed_scale"):
-                m.embed_scale = torch.tensor(m.scalar_embed_scale, device=self.device)
+                m.embed_scale = torch.tensor(m.scalar_embed_scale, dtype=torch.bfloat16, device=self.device)
         if len(self.store._handles) > 3:
             self.store._handles.clear()
         return layer
@@ -1717,16 +1738,16 @@ def run_gguf_phase(
         ev.model.lm_head.to("cpu")
         torch.cuda.empty_cache()
         t_im = time.perf_counter()
-        subprocess.run(
-            [
-                str(bin_dir / "llama-imatrix"),
-                "-m", str(bf16_gguf),
-                "-f", str(cal_txt),
-                "-o", str(imatrix_dat),
-                "-c", "2048", "-b", "512", "--chunks", "64", "-ngl", "99",
-            ],
-            check=True,
-        )
+        im_cmd = [
+            str(bin_dir / "llama-imatrix"),
+            "-m", str(bf16_gguf),
+            "-f", str(cal_txt),
+            "-o", str(imatrix_dat),
+            "-c", "2048", "-b", "512", "--chunks", "64", "-ngl", "99",
+        ]
+        if "gemma-4" in model_dir.name.lower() or "gemma4" in model_dir.name.lower():
+            im_cmd.append("--parse-special")
+        subprocess.run(im_cmd, check=True)
         imatrix_sec = round(time.perf_counter() - t_im, 2)
         results["gguf_imatrix_sec"] = imatrix_sec
         out_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
@@ -1827,8 +1848,8 @@ def run_exl3_phase(
 
         eb, hb = choose_exl3_eb_hb(b_tgt)
         # Solve exact `--bits` so total text-model EXL3 size hits `b_tgt`
-        # Account for scale vectors `suh + svh` (~0.02 bpw) and Gemma-4 `704->768` padding if present
-        pad_factor = 1.038 if "gemma-4" in model_dir.name.lower() else 1.008
+        # Account for scale vectors `suh + svh` (~0.02 bpw) and Gemma-4 `704->768` padding across gate/up/down_proj
+        pad_factor = 1.0985 if "gemma-4" in model_dir.name.lower() else 1.008
         b_dec = (b_tgt * total_params - eb * emb_p - hb * head_p_exl3 - other_bits) / max(dec_p * pad_factor, 1.0)
         b_dec = round(max(min(b_dec, 7.95), 1.55), 4)
 
