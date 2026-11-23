@@ -34,7 +34,6 @@ from typing import Dict, List, Optional, Tuple
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
-import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -56,7 +55,6 @@ from src.eval_kld import (
     paired_bootstrap_ppl_diff,
 )
 from src.vtq_native import NativeVtqCodec
-from src.vtq_stream_cov import ConsumableCov
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -229,15 +227,18 @@ def prepare_neutral_cal_and_traces(
     wt2_cache = work_dir / f"wt2_eval_{tag}.json"
 
     tok = AutoTokenizer.from_pretrained(str(model_dir))
+    bos_id = getattr(tok, "bos_token_id", None)
     if not cal_st.exists() or not cal_txt.exists() or not wt2_cache.exists():
         raw_test = (ROOT / "data" / "wikitext2_test.raw").read_text(encoding="utf-8")
         test_ids = tok.encode(raw_test, add_special_tokens=False)
         eval_seqs = []
-        chunk_len = 512
+        step_len = 511 if bos_id is not None else 512
         for i in range(40):
-            seg = test_ids[i * chunk_len : (i + 1) * chunk_len]
+            seg = test_ids[i * step_len : (i + 1) * step_len]
             if len(seg) < 128:
                 break
+            if bos_id is not None:
+                seg = [int(bos_id)] + seg
             eval_seqs.append({"id": f"wt2_{i}", "token_ids": seg, "score_spans": [[64, len(seg)]]})
         wt2_cache.write_text(json.dumps({"sequences": eval_seqs}), encoding="utf-8")
 
@@ -246,10 +247,16 @@ def prepare_neutral_cal_and_traces(
         articles = [t.strip() for t in ds_train["text"] if t and len(t.strip()) > 60]
         train_text = "\n\n".join(articles)
         train_ids = tok.encode(train_text, add_special_tokens=False)
-        need = n_cal_rows * cal_seq_len
+        row_step = (cal_seq_len - 1) if bos_id is not None else cal_seq_len
+        need = n_cal_rows * row_step
         if len(train_ids) < need:
             train_ids = (train_ids * ((need // len(train_ids)) + 2))[:need]
-        cal_ids = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, cal_seq_len).contiguous()
+        cal_rows = torch.tensor(train_ids[:need], dtype=torch.long).view(n_cal_rows, row_step)
+        if bos_id is not None:
+            bos_col = torch.full((n_cal_rows, 1), int(bos_id), dtype=torch.long)
+            cal_ids = torch.cat([bos_col, cal_rows], dim=1).contiguous()
+        else:
+            cal_ids = cal_rows.contiguous()
         save_file({"input_ids": cal_ids}, str(cal_st))
 
         # Exact decoded text of those 64 x 2048 chunks for `llama-imatrix`
@@ -330,26 +337,12 @@ class StreamingCausalEvaluator:
 
     @torch.no_grad()
     def capture_input_and_ctx(self, ids: torch.Tensor) -> Tuple[torch.Tensor, List[tuple]]:
-        """Captures `h_0` (on CPU) and per-layer `(rest, kwargs)` contexts (masks, RoPE) across all layers."""
+        """Captures `h_0` (on CPU) and exact per-layer `(rest, kwargs)` contexts with isolated per-sequence `shared_kv_states`."""
         ids_gpu = ids.to(self.device)
-        self.want = 0
-        try:
-            self.tm(input_ids=ids_gpu, use_cache=False)
-        except hqm._Stop:
-            pass
-        a0, kw0 = self.caught
-        self.caught = None
-        h0_cpu = a0[0].detach().cpu()
-
-        # Check which distinct layer context types exist (e.g. sliding vs full attention, linear vs full)
+        seq_kv_state: dict = {}
         ctxs = []
-        seen_by_type = {}
-        layer_types = getattr(self.config, "layer_types", None)
+        h0_cpu = None
         for l_idx in range(self.n_layers):
-            lt_key = layer_types[l_idx] if layer_types is not None else "default"
-            if lt_key in seen_by_type:
-                ctxs.append(seen_by_type[lt_key])
-                continue
             self.want = l_idx
             try:
                 self.tm(input_ids=ids_gpu, use_cache=False)
@@ -357,10 +350,12 @@ class StreamingCausalEvaluator:
                 pass
             args, kwargs = self.caught
             self.caught = None
+            if l_idx == 0:
+                h0_cpu = args[0].detach().cpu()
             kwargs = {k: hqm._own(v) for k, v in kwargs.items()}
-            c = (tuple(hqm._own(a) for a in args[1:]), kwargs)
-            seen_by_type[lt_key] = c
-            ctxs.append(c)
+            if "shared_kv_states" in kwargs:
+                kwargs["shared_kv_states"] = seq_kv_state
+            ctxs.append((tuple(hqm._own(a) for a in args[1:]), kwargs))
         return h0_cpu, ctxs
 
     def load_layer_bf16(self, l_idx: int) -> nn.Module:
@@ -403,7 +398,18 @@ class StreamingCausalEvaluator:
         rest, kwargs = ctx
         out = layer(h_cpu.to(self.device), *rest, **kwargs)
         out = out[0] if isinstance(out, tuple) else out
+        st = kwargs.get("shared_kv_states")
+        if isinstance(st, dict):
+            for k, v in list(st.items()):
+                if isinstance(v, tuple) and len(v) > 0 and torch.is_tensor(v[0]) and v[0].is_cuda:
+                    st[k] = tuple(t.detach().cpu() for t in v)
         return out.detach().cpu()
+
+    def call_layer_partial(self, layer: nn.Module, h_cpu: torch.Tensor, ctx: tuple):
+        rest, kwargs = ctx
+        if "shared_kv_states" in kwargs:
+            kwargs = dict(kwargs, shared_kv_states=dict(kwargs["shared_kv_states"]))
+        layer(h_cpu.to(self.device), *rest, **kwargs)
 
     def logits(self, h_gpu: torch.Tensor) -> torch.Tensor:
         out = self.model.lm_head(self.tm.norm(h_gpu))
@@ -599,6 +605,8 @@ def compute_general_fisher_offload(
         for s in range(n):
             x = layer_inputs[l_idx][s].to(dev).detach().requires_grad_(True)
             rest, kwargs = ctxs_per_seq[s][l_idx]
+            if "shared_kv_states" in kwargs:
+                kwargs = dict(kwargs, shared_kv_states=dict(kwargs["shared_kv_states"]))
             with torch.enable_grad():
                 out = lay(x, *rest, **kwargs)
                 out = out[0] if isinstance(out, tuple) else out
@@ -650,7 +658,7 @@ def run_layer_moe_hessians(
     xs_gpu_inputs = []
     S = torch.zeros((E, H_dim, H_dim), dtype=torch.float32, device=device)
     n = torch.zeros(E, dtype=torch.float64)
-    acc_all = ConsumableCov(False)
+    acc_all = lv2._CovAccumulator()
 
     is_gemma4 = (ex_pfx == "experts")
     for h_c in hs_in_cpu:
@@ -670,11 +678,11 @@ def run_layer_moe_hessians(
         acc_all.add(x_exp)
         for e in torch.unique(sel).tolist():
             if e < E:
-                xe = x_exp[(sel == e).any(dim=-1)].float()
-                S[e] += xe.T @ xe
+                xe = x_exp[(sel == e).any(dim=-1)]
+                S[e] += torch.mm(xe.T, xe, out_dtype=torch.float32)
                 n[e] += xe.shape[0]
 
-    H_layer, _ = acc_all.get()
+    H_layer = acc_all.get()
     for e in range(E):
         on_gate_up(e, (S[e] + shrink * H_layer) / (float(n[e]) + shrink))
     del S, H_layer
@@ -682,7 +690,7 @@ def run_layer_moe_hessians(
 
     S_d = torch.zeros((E, I_dim, I_dim), dtype=torch.float32, device=device)
     n_d = torch.zeros(E, dtype=torch.float64)
-    acc_mid = ConsumableCov(False)
+    acc_mid = lv2._CovAccumulator()
     for x_exp_c, sel_c in zip(xs_gpu_inputs, routes):
         x_exp = x_exp_c.to(device)
         sel = sel_c.to(device)
@@ -690,12 +698,12 @@ def run_layer_moe_hessians(
             if e < E:
                 xe = x_exp[(sel == e).any(dim=-1)]
                 gate_t, up_t = F.linear(xe, ex_obj.gate_up_proj[e]).chunk(2, dim=-1)
-                mid = (ex_obj.act_fn(gate_t) * up_t).float()
-                S_d[e] += mid.T @ mid
+                mid = ex_obj.act_fn(gate_t) * up_t
+                S_d[e] += torch.mm(mid.T, mid, out_dtype=torch.float32)
                 n_d[e] += mid.shape[0]
                 acc_mid.add(mid)
 
-    H_mid, _ = acc_mid.get()
+    H_mid = acc_mid.get()
     for e in range(E):
         on_down(e, (S_d[e] + shrink * H_mid) / (float(n_d[e]) + shrink))
     del S_d, H_mid, xs_gpu_inputs, routes
@@ -746,51 +754,6 @@ def slice_step_for_matrix(name: str, M: int) -> int:
     return 16
 
 
-def _swiglu_prefixes(mods: Dict[str, nn.Module]) -> List[str]:
-    out = []
-    for pfx in ("mlp", "mlp.shared_expert"):
-        g_nm, u_nm, d_nm = f"{pfx}.gate_proj", f"{pfx}.up_proj", f"{pfx}.down_proj"
-        if (
-            g_nm in mods and u_nm in mods and d_nm in mods
-            and is_quantizable_linear(g_nm, mods[g_nm])
-            and is_quantizable_linear(u_nm, mods[u_nm])
-            and is_quantizable_linear(d_nm, mods[d_nm])
-            and mods[g_nm].out_features == mods[u_nm].out_features == mods[d_nm].in_features
-            and getattr(mods[g_nm], "bias", None) is None
-            and getattr(mods[u_nm], "bias", None) is None
-        ):
-            out.append(pfx)
-    return out
-
-
-def _compute_swiglu_perm(
-    wg: torch.Tensor,
-    wu: torch.Tensor,
-    sg: torch.Tensor,
-    su: torch.Tensor,
-    H_up: torch.Tensor,
-) -> torch.Tensor:
-    diag_up = torch.diagonal(H_up).clamp(min=1e-8)
-    mlp_imp = sg.float() * (wg.float().square() * diag_up.unsqueeze(0)).sum(dim=1) + su.float() * (
-        wu.float().square() * diag_up.unsqueeze(0)
-    ).sum(dim=1)
-    mlp_imp_q = torch.round(torch.log10(mlp_imp.clamp(min=1e-30)) * 1000.0)
-    perm_desc = torch.sort(mlp_imp_q, descending=True, stable=True).indices
-    Kd = wg.shape[0]
-    if Kd >= 512 and Kd % 512 == 0:
-        return perm_desc.view(Kd // 512, 256, 2).transpose(1, 2).reshape(Kd).contiguous()
-    if Kd >= 64 and Kd % 64 == 0:
-        return perm_desc.view(Kd // 64, 32, 2).transpose(1, 2).reshape(Kd).contiguous()
-    return perm_desc.contiguous()
-
-
-def _apply_swiglu_perm(mods: Dict[str, nn.Module], pfx: str, perm: torch.Tensor):
-    p = perm.to(mods[f"{pfx}.gate_proj"].weight.device)
-    mods[f"{pfx}.gate_proj"].weight.data = mods[f"{pfx}.gate_proj"].weight.data.index_select(0, p).contiguous()
-    mods[f"{pfx}.up_proj"].weight.data = mods[f"{pfx}.up_proj"].weight.data.index_select(0, p).contiguous()
-    mods[f"{pfx}.down_proj"].weight.data = mods[f"{pfx}.down_proj"].weight.data.index_select(1, p).contiguous()
-
-
 @torch.no_grad()
 def build_vtq_profile_and_head_hessian(
     ev: StreamingCausalEvaluator,
@@ -798,40 +761,33 @@ def build_vtq_profile_and_head_hessian(
     fisher: Dict[Tuple[int, str], torch.Tensor],
     profile_cache_path: Path,
     n_profile_rows: int = 16,
-) -> dict:
+) -> Tuple[dict, torch.Tensor]:
     if profile_cache_path.exists():
-        return torch.load(str(profile_cache_path), map_location="cpu", weights_only=False)
+        saved = torch.load(str(profile_cache_path), map_location="cpu", weights_only=False)
+        return saved["profile"], saved["H_head"]
 
-    n_cal = cal_ids.shape[0]
-    n_p = min(n_profile_rows, n_cal)
-    print(
-        f"\n=== Building VTQ Slice Profile + SwiGLU Perms ({n_p}x{cal_ids.shape[1]}) & Clean Head Ref ({n_cal}x{cal_ids.shape[1]}) ===",
-        flush=True,
-    )
+    print(f"\n=== Building VTQ Slice Distortion Profile & Head Hessian ({n_profile_rows}x{cal_ids.shape[1]}) ===", flush=True)
     t0 = time.perf_counter()
     dev = ev.device
     ev.restore_clean_embed_and_head()
     vtq.load_and_register_vtq()
 
+    n_p = min(n_profile_rows, cal_ids.shape[0])
     hs_cpu = []
     ctxs = []
-    for i in range(n_cal):
+    for i in range(n_p):
         h0, c = ev.capture_input_and_ctx(cal_ids[i : i + 1])
         hs_cpu.append(h0)
         ctxs.append(c)
 
     slices = []
-    mlp_perms: Dict[Tuple[int, str], torch.Tensor] = {}
-
     for l_idx in range(ev.n_layers):
         lay = ev.load_layer_bf16(l_idx)
         mods = dict(lay.named_modules())
         ex_obj, ex_pfx = get_moe_experts_and_prefix(lay)
-        swiglu_pfxs = set(_swiglu_prefixes(mods))
 
         def _probe_run():
-            rest, kwargs = ctxs[0][l_idx]
-            lay(hs_cpu[0].to(dev), *rest, **kwargs)
+            ev.call_layer_partial(lay, hs_cpu[0], ctxs[0][l_idx])
 
         groups = discover_linear_groups(lay, _probe_run)
 
@@ -839,7 +795,7 @@ def build_vtq_profile_and_head_hessian(
             q_names = [nm for nm in g if is_quantizable_linear(nm, mods[nm])]
             if not q_names:
                 continue
-            acc = ConsumableCov(False)
+            acc = lv2._CovAccumulator()
 
             def _cap_hook(m, a, ca=acc):
                 ca.add(a[0])
@@ -848,52 +804,32 @@ def build_vtq_profile_and_head_hessian(
             h_cap = mods[q_names[0]].register_forward_pre_hook(_cap_hook)
             try:
                 for s in range(n_p):
-                    rest, kwargs = ctxs[s][l_idx]
                     try:
-                        lay(hs_cpu[s].to(dev), *rest, **kwargs)
+                        ev.call_layer_partial(lay, hs_cpu[s], ctxs[s][l_idx])
                     except _StopCapture:
                         pass
             finally:
                 h_cap.remove()
-            H_g, _ = acc.get()
-
-            # Compute & apply lossless gated-MLP intermediate channel permutation right before profiling gate/up
-            for spfx in list(swiglu_pfxs):
-                if f"{spfx}.gate_proj" in q_names and f"{spfx}.up_proj" in q_names:
-                    perm = _compute_swiglu_perm(
-                        mods[f"{spfx}.gate_proj"].weight.data,
-                        mods[f"{spfx}.up_proj"].weight.data,
-                        fisher[(l_idx, f"{spfx}.gate_proj")].to(dev),
-                        fisher[(l_idx, f"{spfx}.up_proj")].to(dev),
-                        H_g,
-                    )
-                    _apply_swiglu_perm(mods, spfx, perm)
-                    mlp_perms[(l_idx, spfx)] = perm.cpu()
-
+            H_g = acc.get()
             for nm in q_names:
                 W = mods[nm].weight.data
                 rw = fisher[(l_idx, nm)].to(dev)
-                for spfx in swiglu_pfxs:
-                    if nm in (f"{spfx}.gate_proj", f"{spfx}.up_proj") and (l_idx, spfx) in mlp_perms:
-                        rw = rw.index_select(0, mlp_perms[(l_idx, spfx)].to(dev))
                 st = slice_step_for_matrix(nm, W.shape[0])
                 vtq.profile_matrix_vtq(slices, l_idx, nm, W, H_g, sqm._seed(l_idx, nm), st, s_row=rw, rot_block=-1)
             del H_g
 
-        # Advance all `n_cal` sequences through BF16 layer while capturing post-attention residual on `n_p` if MoE is present
+        # Advance `hs_cpu` through BF16 layer while capturing exact post-attention residual if MoE is present
         post_attn_res_cpu = []
         if ex_obj is not None:
             is_gemma4 = (ex_pfx == "experts")
             target_norm = lay.pre_feedforward_layernorm if is_gemma4 else lay.post_attention_layernorm
-            hk = target_norm.register_forward_pre_hook(
-                lambda m, a: post_attn_res_cpu.append(a[0].detach().cpu()) if len(post_attn_res_cpu) < n_p else None
-            )
+            hk = target_norm.register_forward_pre_hook(lambda m, a: post_attn_res_cpu.append(a[0].detach().cpu()))
         else:
             hk = None
 
         next_hs = []
         try:
-            for s in range(n_cal):
+            for s in range(n_p):
                 next_hs.append(ev.call_layer(lay, hs_cpu[s], ctxs[s][l_idx]))
         finally:
             if hk is not None:
@@ -921,66 +857,30 @@ def build_vtq_profile_and_head_hessian(
         if l_idx % 8 == 0 or l_idx == ev.n_layers - 1:
             print(f"  [Profile] layer {l_idx}/{ev.n_layers - 1} done (+{time.perf_counter()-t0:.1f}s)", flush=True)
 
-    # Pre-`lm_head` Hessian `H_head`, clean normalized hidden states `ref_norm_cpu`, and per-token `head_fisher` + `embed_fisher`
-    V, _ = ev.clean_embed_cpu.shape
-    acc_head = ConsumableCov(False)
-    ref_norm_cpu = []
-    head_fisher_acc = torch.zeros(V, dtype=torch.float64, device=dev)
-    n_f_toks = 0
-    for i, h_c in enumerate(hs_cpu):
-        nh = ev.tm.norm(h_c.to(dev))
-        acc_head.add(nh)
-        ref_norm_cpu.append(nh.detach().to(dtype=torch.bfloat16, device="cpu"))
-        if i < n_p:
-            flat_h = h_c.view(-1, h_c.shape[-1])
-            for c0 in range(0, flat_h.shape[0], 1024):
-                lg = ev.logits(flat_h[c0 : c0 + 1024].to(dev)).float()
-                pr = F.softmax(lg, dim=-1)
-                head_fisher_acc.add_((pr * (1.0 - pr)).sum(dim=0).double())
-                n_f_toks += lg.shape[0]
-                del lg, pr
-        del nh
-    del hs_cpu
-    H_head, _ = acc_head.get()
-    H_head = H_head.cpu()
-    head_fisher = (head_fisher_acc / max(n_f_toks, 1)).float().clamp(min=1e-6).cpu()
-    del head_fisher_acc
-
-    freq = torch.bincount(cal_ids.reshape(-1).cpu(), minlength=V).float() / max(cal_ids.numel(), 1)
-    hf_n = head_fisher / head_fisher.mean().clamp(min=1e-12)
-    fr_n = freq / freq.mean().clamp(min=1e-12)
-    embed_fisher = (0.5 * fr_n + 0.5 * hf_n).clamp(min=0.05, max=20.0).contiguous()
+    # Pre-`lm_head` Hessian `H_head = E[norm(h)^T norm(h)]`
+    acc_head = lv2._CovAccumulator()
+    for h_c in hs_cpu:
+        acc_head.add(ev.tm.norm(h_c.to(dev)))
+    H_head = acc_head.get().cpu()
 
     profile = sqm.finalize_profile(slices)
-    bundle = {
-        "profile": profile,
-        "mlp_perms": mlp_perms,
-        "H_head": H_head,
-        "head_fisher": head_fisher,
-        "embed_fisher": embed_fisher,
-        "ref_norm_cpu": ref_norm_cpu,
-    }
-    torch.save(bundle, str(profile_cache_path))
-    torch.cuda.empty_cache()
-    print(f"=== Saved VTQ Profile ({len(slices)} slices, {len(mlp_perms)} SwiGLU perms) in {time.perf_counter()-t0:.1f}s ===", flush=True)
-    return bundle
+    torch.save({"profile": profile, "H_head": H_head}, str(profile_cache_path))
+    print(f"=== Saved VTQ Profile ({len(slices)} slices) in {time.perf_counter()-t0:.1f}s ===", flush=True)
+    return profile, H_head
 
 
 # =================================================================================================
 # 6. Full End-to-End VTQ Quantizer & `.vtq` v2 Container Exporter
 # =================================================================================================
 
-def choose_vtq_embed_head_specs(target_bpw: float, tie_word_embeddings: bool = False) -> Tuple[str, str]:
-    """Standard protected `embed_tokens` (~4..6 bpw) and `lm_head` (~6 bpw), matched to EXL3 `-eb 4/5/5/6 -hb 6`."""
-    if tie_word_embeddings:
-        return "VTQ_600", "VTQ_600"
+def choose_vtq_embed_head_specs(target_bpw: float) -> Tuple[str, str]:
     if target_bpw <= 2.6:
-        return "VTQ_375", "VTQ_575"
+        return "VTQ_225", "VTQ_350"
     if target_bpw <= 3.6:
-        return "VTQ_475", "VTQ_575"
+        return "VTQ_325", "VTQ_450"
     if target_bpw <= 4.6:
-        return "VTQ_475", "VTQ_575"
-    return "VTQ_575", "VTQ_575"
+        return "VTQ_425", "VTQ_550"
+    return "VTQ_600", "VTQ_600"
 
 
 @torch.no_grad()
@@ -988,7 +888,8 @@ def quantize_and_export_vtq_full(
     ev: StreamingCausalEvaluator,
     cal_ids: torch.Tensor,
     fisher: Dict[Tuple[int, str], torch.Tensor],
-    prof_bundle: dict,
+    profile: dict,
+    H_head_cpu: torch.Tensor,
     target_bpw: float,
     out_vtq_path: Path,
     codec: NativeVtqCodec,
@@ -998,20 +899,42 @@ def quantize_and_export_vtq_full(
     vtq.load_and_register_vtq()
     all_fmts = list(vf.load_vtq_formats().values())
 
-    profile = prof_bundle["profile"]
-    mlp_perms: Dict[Tuple[int, str], torch.Tensor] = prof_bundle.get("mlp_perms", {})
-    H_head_cpu: torch.Tensor = prof_bundle["H_head"]
-    head_fisher_cpu: torch.Tensor = prof_bundle["head_fisher"]
-    embed_fisher_cpu: torch.Tensor = prof_bundle["embed_fisher"]
-    ref_norm_cpu: List[torch.Tensor] = prof_bundle["ref_norm_cpu"]
-
     info = ev.count_text_params_and_breakdown()
     total_params = info["total_text_params"]
-    emb_spec, head_spec = choose_vtq_embed_head_specs(target_bpw, ev.tie_word_embeddings)
-    V, H_dim = ev.clean_embed_cpu.shape
+    emb_spec, head_spec = choose_vtq_embed_head_specs(target_bpw)
+    if ev.tie_word_embeddings:
+        # Single shared table serves both lookup and output logits: allocate slightly richer spec
+        emb_spec = {"VTQ_225": "VTQ_275_H2", "VTQ_325": "VTQ_375", "VTQ_425": "VTQ_475", "VTQ_600": "VTQ_600"}[emb_spec]
 
+    def _matrix_bytes(M: int, K: int, sp_name: str) -> int:
+        M_p = ((M + 15) // 16) * 16
+        K_p = ((K + 255) // 256) * 256
+        st_b = vtq.VTQ_CONFIG[sp_name]["st_bytes"]
+        data_b = (M_p // 16) * (K_p // 256) * st_b
+        return ((data_b + 63) & ~63) + ((2 * M_p + 63) & ~63) + ((2 * K_p + 63) & ~63) + 64
+
+    V, H_dim = ev.clean_embed_cpu.shape
+    emb_bytes = _matrix_bytes(V, H_dim, emb_spec)
+    head_bytes = 0 if ev.tie_word_embeddings else _matrix_bytes(V, H_dim, head_spec)
+    unchanged_bytes = info["unchanged_other_params"] * 2 + 131072  # BF16/FP32 norms/routers + ~128 KB metadata/alignment
+
+    # Compute exact `d_row + suh` header bytes across all decoder linear matrices (excluding `u_sb` which is in `st_bytes`)
+    dec_scale_bytes = 0
     dec_padded_params = sum(int(s["params"]) for s in profile["slices"])
-    dp_target_bpw = max(min(float(target_bpw), 6.22), 1.61)
+    seen_mat = set()
+    for s in profile["slices"]:
+        mk = (s["layer"], s["subname"])
+        if mk not in seen_mat:
+            seen_mat.add(mk)
+            K_p = s["params"] // (s["r1"] - s["r0"])
+            dec_scale_bytes += 2 * K_p + 128  # suh + alignment
+        dec_scale_bytes += 2 * (s["r1"] - s["r0"])
+
+    target_total_bytes = target_bpw * total_params / 8.0
+    avail_dec_tile_bytes = target_total_bytes - emb_bytes - head_bytes - unchanged_bytes - dec_scale_bytes
+    # Note: `LIQK_V2_SPECS[sp].bpw` includes `+2.0 / 256.0 = 0.0078125` bpw for `d_row`, so match its definition:
+    dp_target_bpw = (avail_dec_tile_bytes * 8.0 / max(dec_padded_params, 1)) + (2.0 / 256.0)
+    dp_target_bpw = max(min(dp_target_bpw, 6.22), 1.61)
 
     cands = vtq.vtq_candidates_for_target(dp_target_bpw, vtq.VTQ_MENU)
     assignment = lv2.solve_fisher_slice_dp(profile, target_bpw=dp_target_bpw, candidate_specs=cands)
@@ -1022,12 +945,9 @@ def quantize_and_export_vtq_full(
     )
     ach_bpw = ach_bits / max(dec_padded_params, 1)
 
-    has_qknorm = any(".q_norm." in k for k in ev.store.keys())
-    eff_gptaq = 0.0 if has_qknorm else 0.50
-
     print(
         f"\n=== [VTQ {target_bpw:.2f} bpw] DP target={dp_target_bpw:.4f} (achieved={ach_bpw:.4f}) | "
-        f"emb={emb_spec} head={'TIED' if ev.tie_word_embeddings else head_spec} | gptaq={eff_gptaq:.2f} ===",
+        f"emb={emb_spec} head={'TIED' if ev.tie_word_embeddings else head_spec} ===",
         flush=True,
     )
 
@@ -1041,129 +961,78 @@ def quantize_and_export_vtq_full(
     lin_bytes_sum = 0
 
     try:
-        n_cal = cal_ids.shape[0]
-        # Capture clean reference `h_0` before overwriting `embed_tokens` when layerwise GPTAQ is active
-        hs_ref_cpu = []
-        ctxs = []
-        if eff_gptaq > 0.0:
-            for i in range(n_cal):
-                hr0, c = ev.capture_input_and_ctx(cal_ids[i : i + 1])
-                hs_ref_cpu.append(hr0)
-                ctxs.append(c)
-
-        # 1. Quantize `embed_tokens` (`Outer-DCT` `rot_block=-1`, `u_sb_gecd_sweeps=1`, Fisher row weights)
+        # 1. Quantize `embed_tokens` (using `rot_block=-1` Outer-DCT; blended with `H_head` if tied!)
         W_emb = ev.clean_embed_cpu.to(dev, dtype=torch.float32)
         if ev.tie_word_embeddings:
             Hh = H_head_cpu.to(dev, dtype=torch.float32)
             Hh_norm = Hh / Hh.diagonal().mean().clamp(min=1e-8)
             H_emb = 0.85 * Hh_norm + 0.15 * torch.eye(H_dim, dtype=torch.float32, device=dev)
-            rw_emb = head_fisher_cpu.to(dev)
-            dm_emb = 0.05
         else:
             H_emb = torch.eye(H_dim, dtype=torch.float32, device=dev)
-            rw_emb = embed_fisher_cpu.to(dev)
-            dm_emb = 0.02
-        _, W_emb_hat, _ = vtq.quantize_matrix_vtq(
-            W_emb, H_emb, emb_spec, seed=9001, damp=dm_emb, row_weights=rw_emb, rot_block=-1, u_sb_gecd_sweeps=1
-        )
+        _, W_emb_hat, _ = vtq.quantize_matrix_vtq(W_emb, H_emb, emb_spec, seed=9001, damp=0.20, rot_block=-1)
         wr.add_matrix(f"{ev.prefix}.embed_tokens", vtq.PACK.pop("matrix"), verify=False)
         quantized_source_keys.add(f"{ev.prefix}.embed_tokens.weight")
         ev.tm.embed_tokens.weight.data.copy_(W_emb_hat.to(torch.bfloat16))
         if ev.tie_word_embeddings:
             ev.model.lm_head.weight = ev.tm.embed_tokens.weight
-        del W_emb, H_emb, rw_emb, W_emb_hat
+        del W_emb, H_emb, W_emb_hat
         torch.cuda.empty_cache()
 
         # 2. Capture initial hidden states on `cal_ids` from the quantized embedding table!
+        n_cal = cal_ids.shape[0]
         hs_cpu = []
+        ctxs = []
         for i in range(n_cal):
             h0, c = ev.capture_input_and_ctx(cal_ids[i : i + 1])
             hs_cpu.append(h0)
-            if eff_gptaq <= 0.0:
-                ctxs.append(c)
+            ctxs.append(c)
 
-        # 3. Stream layer-by-layer quantization (with SwiGLU perms, `u_sb_gecd_sweeps=1` on dense/shared, and GPTAQ)
-        use_g = eff_gptaq > 0.0
+        # 3. Stream layer-by-layer quantization
         for l_idx in range(ev.n_layers):
             lay = ev.load_layer_bf16(l_idx)
             mods = dict(lay.named_modules())
             ex_obj, ex_pfx = get_moe_experts_and_prefix(lay)
             lay_pfx = f"{ev.prefix}.layers.{l_idx}"
 
-            for spfx in ("mlp", "mlp.shared_expert"):
-                if (l_idx, spfx) in mlp_perms:
-                    _apply_swiglu_perm(mods, spfx, mlp_perms[(l_idx, spfx)].to(dev))
-
-            lay_ref = copy.deepcopy(lay) if use_g else None
-            mods_ref = dict(lay_ref.named_modules()) if lay_ref is not None else None
-
             def _probe_run():
-                rest, kwargs = ctxs[0][l_idx]
-                lay(hs_cpu[0].to(dev), *rest, **kwargs)
+                ev.call_layer_partial(lay, hs_cpu[0], ctxs[0][l_idx])
 
             groups = discover_linear_groups(lay, _probe_run)
             for g in groups:
                 q_names = [nm for nm in g if is_quantizable_linear(nm, mods[nm])]
                 if not q_names:
                     continue
-                acc = ConsumableCov(use_g)
-                cap_q_holder = [None]
-                cap_r_holder = [None]
+                acc = lv2._CovAccumulator()
 
-                def _cap_q(m, a):
-                    cap_q_holder[0] = a[0]
-                    raise _StopCapture()
-
-                def _cap_r(m, a):
-                    cap_r_holder[0] = a[0]
+                def _cap_q(m, a, ca=acc):
+                    ca.add(a[0])
                     raise _StopCapture()
 
                 h_cap = mods[q_names[0]].register_forward_pre_hook(_cap_q)
-                h_cap_r = mods_ref[q_names[0]].register_forward_pre_hook(_cap_r) if use_g else None
                 try:
                     for s in range(n_cal):
-                        rest, kwargs = ctxs[s][l_idx]
                         try:
-                            lay(hs_cpu[s].to(dev), *rest, **kwargs)
+                            ev.call_layer_partial(lay, hs_cpu[s], ctxs[s][l_idx])
                         except _StopCapture:
                             pass
-                        if use_g:
-                            try:
-                                lay_ref(hs_ref_cpu[s].to(dev), *rest, **kwargs)
-                            except _StopCapture:
-                                pass
-                        acc.add(cap_q_holder[0], cap_r_holder[0])
-                        cap_q_holder[0] = None
-                        cap_r_holder[0] = None
                 finally:
                     h_cap.remove()
-                    if h_cap_r is not None:
-                        h_cap_r.remove()
-
-                is_down_grp = any(nm.endswith(("down_proj", "o_proj", "out_proj")) for nm in q_names)
-                H_g, B_g = acc.get(gptaq_damp=0.30 if is_down_grp else 0.20)
-                del acc
-
+                H_g = acc.get()
                 for nm in q_names:
                     W = mods[nm].weight.data
                     rw = fisher[(l_idx, nm)].to(dev)
-                    for spfx in ("mlp", "mlp.shared_expert"):
-                        if nm in (f"{spfx}.gate_proj", f"{spfx}.up_proj") and (l_idx, spfx) in mlp_perms:
-                            rw = rw.index_select(0, mlp_perms[(l_idx, spfx)].to(dev))
                     row_sl = assignment[(l_idx, nm)]
                     dm = 0.30 if nm.endswith(("down_proj", "o_proj", "out_proj")) else 0.20
-                    W_tgt = vtq._drift_target(W.float(), B_g, eff_gptaq) if (use_g and B_g is not None) else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw,
-                        rot_block=-1, W_target=W_tgt, u_sb_gecd_sweeps=1,
+                        W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1
                     )
                     wr.add_matrix(f"{lay_pfx}.{nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     quantized_source_keys.add(f"{lay_pfx}.{nm}.weight")
                     mods[nm].weight.data.copy_(w_hat.to(W.dtype))
-                    del w_hat, W_tgt
-                del H_g, B_g
+                    del w_hat
+                del H_g
                 torch.cuda.empty_cache()
 
             if ex_obj is not None:
@@ -1178,9 +1047,8 @@ def quantize_and_export_vtq_full(
                 hk = target_norm.register_forward_pre_hook(_cap_moe_res)
                 try:
                     for s in range(n_cal):
-                        rest, kwargs = ctxs[s][l_idx]
                         try:
-                            lay(hs_cpu[s].to(dev), *rest, **kwargs)
+                            ev.call_layer_partial(lay, hs_cpu[s], ctxs[s][l_idx])
                         except _StopCapture:
                             pass
                 finally:
@@ -1218,6 +1086,7 @@ def quantize_and_export_vtq_full(
                     del w_hat
 
                 run_layer_moe_hessians(lay, moe_in, dev, _q_gu, _q_dn)
+                # Mark fused or per-expert checkpoint keys as replaced
                 for kind in ("gate_up_proj", "down_proj"):
                     fk = f"{lay_pfx}.{ex_pfx}.{kind}"
                     if ev.store.has(fk):
@@ -1230,33 +1099,25 @@ def quantize_and_export_vtq_full(
                             else:
                                 quantized_source_keys.add(f"{lay_pfx}.{ex_pfx}.{e}.down_proj.weight")
 
-            # Advance quantized (and reference) calibration streams to next layer
+            # Advance quantized calibration stream to next layer
             hs_cpu = [ev.call_layer(lay, hs_cpu[s], ctxs[s][l_idx]) for s in range(n_cal)]
-            if use_g and lay_ref is not None:
-                hs_ref_cpu = [ev.call_layer(lay_ref, hs_ref_cpu[s], ctxs[s][l_idx]) for s in range(n_cal)]
-                del lay_ref, mods_ref
             ev.release_layer(l_idx)
             torch.cuda.empty_cache()
             if l_idx % 8 == 0 or l_idx == ev.n_layers - 1:
                 print(f"  [VTQ {target_bpw:.1f}] layer {l_idx}/{ev.n_layers - 1} done (+{time.perf_counter()-t0:.1f}s)", flush=True)
 
-        # 4. Quantize untied `lm_head` with end-to-end GPTAQ (`norm(h_q)` vs `norm(h_ref)`), Fisher row weights, and `u_sb_gecd_sweeps=1`
+        # 4. Quantize untied `lm_head` using the quantized stream's final `norm(h)` Hessian
         if not ev.tie_word_embeddings:
-            acc_qh = ConsumableCov(True)
-            for s, h_c in enumerate(hs_cpu):
-                acc_qh.add(ev.tm.norm(h_c.to(dev)), ref_norm_cpu[s].to(dev))
-            H_qh, B_qh = acc_qh.get(gptaq_damp=0.20)
+            acc_qh = lv2._CovAccumulator()
+            for h_c in hs_cpu:
+                acc_qh.add(ev.tm.norm(h_c.to(dev)))
+            H_qh = acc_qh.get()
             W_hd = ev.clean_head_cpu.to(dev, dtype=torch.float32)
-            W_hd_tgt = vtq._drift_target(W_hd, B_qh, 0.50) if B_qh is not None else None
-            rw_hd = head_fisher_cpu.to(dev)
-            _, W_hd_hat, _ = vtq.quantize_matrix_vtq(
-                W_hd, H_qh, head_spec, seed=9002, damp=0.05, row_weights=rw_hd,
-                rot_block=-1, W_target=W_hd_tgt, u_sb_gecd_sweeps=1,
-            )
+            _, W_hd_hat, _ = vtq.quantize_matrix_vtq(W_hd, H_qh, head_spec, seed=9002, damp=0.20, rot_block=-1)
             wr.add_matrix("lm_head", vtq.PACK.pop("matrix"), verify=False)
             quantized_source_keys.add("lm_head.weight")
-            del W_hd, W_hd_tgt, rw_hd, H_qh, B_qh, W_hd_hat
-        del hs_cpu, hs_ref_cpu
+            del W_hd, H_qh, W_hd_hat
+        del hs_cpu
         torch.cuda.empty_cache()
 
         # 5. Copy all unchanged text-model tensors (norms, routers, conv1d, scalars; skip vision/audio/mtp)
@@ -1265,8 +1126,6 @@ def quantize_and_export_vtq_full(
             if k in quantized_source_keys or k.startswith(skip_prefixes):
                 continue
             wr.add_tensor(k, ev.store.get(k, "cpu"))
-        if len(ev.store._handles) > 4:
-            ev.store._handles.clear()
 
         meta = vf.source_metadata(ev.model_dir)
         meta["quantization"] = {
@@ -1336,8 +1195,7 @@ class VtqDiskLoader:
         for nm, mod in lay.named_modules():
             if isinstance(mod, nn.Linear) and is_quantizable_linear(nm, mod):
                 wq = self.rd.decode_matrix(f"{lpfx}.{nm}", device=dev).to(mod.weight.dtype)
-                # Note: SwiGLU `gate_proj/up_proj/down_proj` channels are sorted via lossless `mlp_perms`
-                if l_idx < 2 and not nm.endswith(("gate_proj", "up_proj", "down_proj")):
+                if l_idx < 2:
                     _best_cand([wq], mod.weight.data, f"vtq.L{l_idx}.{nm}")
                 mod.weight.data.copy_(wq)
         ex_obj, ex_pfx = get_moe_experts_and_prefix(lay)
@@ -1925,14 +1783,11 @@ def run_gguf_phase(
         bf16_gguf.unlink(missing_ok=True)
 
 
-def choose_exl3_eb_hb(target_bpw: float, tie_word_embeddings: bool = False) -> Tuple[int, int]:
-    """Standard protected `embed_bits` (`4/5/5/6`) and `head_bits = 6`, matched component-for-component with VTQ."""
-    if tie_word_embeddings:
-        return 6, 6
+def choose_exl3_eb_hb(target_bpw: float) -> Tuple[int, int]:
     if target_bpw <= 2.6:
-        return 4, 6
+        return 3, 4
     if target_bpw <= 3.6:
-        return 5, 6
+        return 4, 5
     if target_bpw <= 4.6:
         return 5, 6
     return 6, 6
@@ -1951,6 +1806,10 @@ def run_exl3_phase(
 ):
     info = ev.count_text_params_and_breakdown()
     total_params = info["total_text_params"]
+    emb_p = info["embed_params"]
+    # Note: EXL3 always writes a separate `lm_head` tensor even when `tie_word_embeddings=True`!
+    head_p_exl3 = emb_p if info["tie_word_embeddings"] else info["lm_head_params"]
+    other_bits = info["unchanged_other_params"] * 16.0
     dec_p = info["quantizable_decoder_linear_params"]
 
     for b_tgt in TARGET_BPWS:
@@ -1958,8 +1817,12 @@ def run_exl3_phase(
         if mkey in results["methods"]:
             continue
 
-        eb, hb = choose_exl3_eb_hb(b_tgt, info["tie_word_embeddings"])
-        b_dec = round(float(b_tgt), 4)
+        eb, hb = choose_exl3_eb_hb(b_tgt)
+        # Solve exact `--bits` so total text-model EXL3 size hits `b_tgt`
+        # Account for scale vectors `suh + svh` (~0.02 bpw) and Gemma-4 `704->768` padding if present
+        pad_factor = 1.038 if "gemma-4" in model_dir.name.lower() else 1.008
+        b_dec = (b_tgt * total_params - eb * emb_p - hb * head_p_exl3 - other_bits) / max(dec_p * pad_factor, 1.0)
+        b_dec = round(max(min(b_dec, 7.95), 1.55), 4)
 
         w_dir = work_dir / f"exl3_work_{b_tgt:.1f}"
         o_dir = work_dir / f"exl3_out_{b_tgt:.1f}"
@@ -2024,9 +1887,8 @@ def run_exl3_phase(
         results["methods"][mkey] = entry
         out_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
         print(
-            f"  [{mkey:8s}] total_bpw={entry['total_bpw']:.4f} (lin={entry['linear_bpw']:.4f}, quant={q_sec:.1f}s) | "
-            f"KLD nem={entry['nemotron']['mean_kld']:.5f} mul={entry['multilingual']['mean_kld']:.5f} wt2={entry['wikitext2']['mean_kld']:.5f} | "
-            f"dPPL nem={entry['nemotron']['delta_ppl']:+.4f} mul={entry['multilingual']['delta_ppl']:+.4f} wt2={entry['wikitext2']['delta_ppl']:+.4f}",
+            f"  [{mkey:8s}] total_bpw={entry['total_bpw']:.4f} (quant={q_sec:.1f}s) | "
+            f"nem={entry['nemotron']['mean_kld']:.5f} mul={entry['multilingual']['mean_kld']:.5f} wt2={entry['wikitext2']['mean_kld']:.5f}",
             flush=True,
         )
 
@@ -2049,7 +1911,7 @@ def run_vtq_phase(
 
     t_prep0 = time.perf_counter()
     fisher = compute_general_fisher_offload(ev, cal_ids, fisher_path)
-    prof_bundle = build_vtq_profile_and_head_hessian(ev, cal_ids, fisher, profile_path)
+    profile, H_head = build_vtq_profile_and_head_hessian(ev, cal_ids, fisher, profile_path)
     prep_sec = round(time.perf_counter() - t_prep0, 2)
     if "vtq_shared_profile_fisher_sec" not in results and prep_sec > 2.0:
         results["vtq_shared_profile_fisher_sec"] = prep_sec
@@ -2057,7 +1919,7 @@ def run_vtq_phase(
     for b_tgt in todo:
         mkey = f"VTQ:{b_tgt:.1f}"
         vtq_file = work_dir / f"model_vtq_{b_tgt:.1f}.vtq"
-        q_meta = quantize_and_export_vtq_full(ev, cal_ids, fisher, prof_bundle, b_tgt, vtq_file, codec)
+        q_meta = quantize_and_export_vtq_full(ev, cal_ids, fisher, profile, H_head, b_tgt, vtq_file, codec)
 
         loader = VtqDiskLoader(vtq_file, codec, ev.prefix, ev.tie_word_embeddings)
         ev_res = evaluate_disk_loader(ev, loader, traces, ref_final)
@@ -2152,7 +2014,7 @@ def main():
         if ph == "vtq":
             codec = build_vtq_native_codec(args.work_dir)
             run_vtq_phase(
-                ev, cal_ids, m_work / "fisher_neutral.pt", m_work / "vtq_profile_v2.pt",
+                ev, cal_ids, m_work / "fisher_neutral.pt", m_work / "vtq_profile.pt",
                 codec, traces, ref_final, results, out_json, m_work,
             )
         elif ph == "gguf":

@@ -11,7 +11,7 @@ Bitrates (`total_bpw`) are measured from the complete serialized text-model file
 
 ## `Llama-3.1-8B-Instruct`
 
-Raw JSON: [`results/paper_llama31_8b_run1_strict_bpw.json`](../../results/paper_llama31_8b_run1_strict_bpw.json)
+Raw JSON: [`results/paper_llama31_8b.json`](../../results/paper_llama31_8b.json)
 
 ![Llama-3.1-8B KLD and Perplexity Pareto](../figures/llama31_8b_kld_ppl.svg)
 
