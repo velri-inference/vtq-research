@@ -22,3 +22,10 @@ NIGHT_PLAN*.md
 *.log
 README_liqk_old.md
 .oxide-artifacts/
+# Internal research notes & prototype docs
+docs/**/experiment-inventory.md
+docs/**/q4v-prototype.md
+docs/**/trellis-night-results.md
+docs/**/tsb1-experiment.md
+docs/**/universal-gate.md
+docs/**/vtq-v2-format.md
