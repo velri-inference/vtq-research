@@ -1625,7 +1625,9 @@ def trace_metrics_dual_head(
         "n_tokens": int(tot),
         "n_seqs": int(len(sk)),
         "per_seq_kld_sums": [float(x) for x in seq_kld],
+        "per_seq_tok_counts": [int(x) for x in seq_cnt],
         "per_seq_token_counts": [int(x) for x in seq_cnt],
+        "per_seq_nll_q_sums": [float(x) for x in seq_nll_q],
         "per_seq_nll_sums": [float(x) for x in seq_nll_q],
     }
 
@@ -1719,61 +1721,60 @@ def run_gguf_phase(
         ev.restore_clean_embed_and_head()
         print(f"  Computed imatrix in {imatrix_sec:.1f}s", flush=True)
 
-    # Quantize all requested presets first, then delete the 50-70 GB `bf16.gguf` immediately to save SSD!
-    q_paths: Dict[str, Tuple[Path, float]] = {}
+    # Stream one GGUF preset at a time (quantize -> evaluate -> save JSON -> unlink) to cap SSD usage on 26B/35B!
     n_threads = min(os.cpu_count() or 16, 32)
-    for preset in todo:
-        q_p = work_dir / f"model-{preset}.gguf"
-        q_p.unlink(missing_ok=True)
-        print(f"\n=== [GGUF] Running `llama-quantize --imatrix` -> `{preset}` ===", flush=True)
-        t_q = time.perf_counter()
-        subprocess.run(
-            [
-                str(bin_dir / "llama-quantize"),
-                "--imatrix", str(imatrix_dat),
-                str(bf16_gguf), str(q_p), preset, str(n_threads),
-            ],
-            check=True,
-        )
-        q_sec = round(time.perf_counter() - t_q, 2)
-        q_paths[preset] = (q_p, q_sec)
+    try:
+        for idx_p, preset in enumerate(todo):
+            q_p = work_dir / f"model-{preset}.gguf"
+            q_p.unlink(missing_ok=True)
+            print(f"\n=== [GGUF] Running `llama-quantize --imatrix` -> `{preset}` ===", flush=True)
+            t_q = time.perf_counter()
+            subprocess.run(
+                [
+                    str(bin_dir / "llama-quantize"),
+                    "--imatrix", str(imatrix_dat),
+                    str(bf16_gguf), str(q_p), preset, str(n_threads),
+                ],
+                check=True,
+            )
+            q_sec = round(time.perf_counter() - t_q, 2)
+            if idx_p == len(todo) - 1:
+                bf16_gguf.unlink(missing_ok=True)
 
-    bf16_gguf.unlink(missing_ok=True)
+            raw_file_bytes = q_p.stat().st_size
+            loader = GgufDiskLoader(q_p, shim, ev.config)
+            non_text_bytes = sum(
+                v["n_bytes"] for k, v in loader.tensors.items()
+                if k.startswith(("v.", "mm.", "mtp.", "nextn."))
+            )
+            file_bytes = raw_file_bytes - non_text_bytes
+            lin_bytes = sum(
+                v["n_bytes"] for k, v in loader.tensors.items()
+                if k.startswith("blk.") and any(tag in k for tag in ("attn_q", "attn_k", "attn_v", "attn_output", "attn_gate", "ssm_out", "ffn_gate.", "ffn_up.", "ffn_down.", "_shexp.", "_exps.weight"))
+            )
+            ev_res = evaluate_disk_loader(ev, loader, traces, ref_final)
+            loader.close()
+            q_p.unlink(missing_ok=True)
 
-    for preset in todo:
-        q_p, q_sec = q_paths[preset]
-        raw_file_bytes = q_p.stat().st_size
-        loader = GgufDiskLoader(q_p, shim, ev.config)
-        non_text_bytes = sum(
-            v["n_bytes"] for k, v in loader.tensors.items()
-            if k.startswith(("v.", "mm.", "mtp.", "nextn."))
-        )
-        file_bytes = raw_file_bytes - non_text_bytes
-        lin_bytes = sum(
-            v["n_bytes"] for k, v in loader.tensors.items()
-            if k.startswith("blk.") and any(tag in k for tag in ("attn_q", "attn_k", "attn_v", "attn_output", "attn_gate", "ssm_out", "ffn_gate.", "ffn_up.", "ffn_down.", "_shexp.", "_exps.weight"))
-        )
-        ev_res = evaluate_disk_loader(ev, loader, traces, ref_final)
-        loader.close()
-        q_p.unlink(missing_ok=True)
-
-        entry = {
-            "format": "GGUF",
-            "preset": preset,
-            "file_bytes": file_bytes,
-            "total_bpw": round(file_bytes * 8.0 / total_params, 5),
-            "linear_bpw": round(lin_bytes * 8.0 / max(info["quantizable_decoder_linear_params"], 1), 5),
-            "quant_sec": q_sec,
-            "quant_plus_imatrix_sec": round(q_sec + float(imatrix_sec or 0.0), 2),
-            **ev_res,
-        }
-        results["methods"][f"GGUF:{preset}"] = entry
-        out_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
-        print(
-            f"  [GGUF:{preset:7s}] total_bpw={entry['total_bpw']:.4f} | "
-            f"nem={entry['nemotron']['mean_kld']:.5f} mul={entry['multilingual']['mean_kld']:.5f} wt2={entry['wikitext2']['mean_kld']:.5f}",
-            flush=True,
-        )
+            entry = {
+                "format": "GGUF",
+                "preset": preset,
+                "file_bytes": file_bytes,
+                "total_bpw": round(file_bytes * 8.0 / total_params, 5),
+                "linear_bpw": round(lin_bytes * 8.0 / max(info["quantizable_decoder_linear_params"], 1), 5),
+                "quant_sec": q_sec,
+                "quant_plus_imatrix_sec": round(q_sec + float(imatrix_sec or 0.0), 2),
+                **ev_res,
+            }
+            results["methods"][f"GGUF:{preset}"] = entry
+            out_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            print(
+                f"  [GGUF:{preset:7s}] total_bpw={entry['total_bpw']:.4f} | "
+                f"nem={entry['nemotron']['mean_kld']:.5f} mul={entry['multilingual']['mean_kld']:.5f} wt2={entry['wikitext2']['mean_kld']:.5f}",
+                flush=True,
+            )
+    finally:
+        bf16_gguf.unlink(missing_ok=True)
 
 
 def choose_exl3_eb_hb(target_bpw: float) -> Tuple[int, int]:
