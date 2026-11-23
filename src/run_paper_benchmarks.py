@@ -1279,9 +1279,10 @@ class GgufDiskLoader:
         o = self.data_off + info["offset"]
         return self.shim.dequant(self.mm[o : o + info["n_bytes"]], info["ggml_type"], info["dims"]).to(dev)
 
-    def _grouped_v(self, W: torch.Tensor, dim: int) -> torch.Tensor:
+    def _grouped_v(self, W: torch.Tensor, dim: int, hdim: Optional[int] = None) -> torch.Tensor:
+        hd = self.dv if hdim is None else hdim
         n = W.shape[dim]
-        idx = torch.arange(n, device=W.device).reshape(self.nv // self.nk, self.nk, self.dv).transpose(0, 1).reshape(n)
+        idx = torch.arange(n, device=W.device).reshape(self.nv // self.nk, self.nk, hd).transpose(0, 1).reshape(n)
         return W.index_select(dim, idx)
 
     def load_embed_and_head(self, ev: StreamingCausalEvaluator):
@@ -1324,6 +1325,8 @@ class GgufDiskLoader:
                         cands.append(torch.cat([W[:q], self._grouped_v(W[q:], 0)], dim=0))
                     elif nm == "linear_attn.in_proj_z":
                         cands.append(self._grouped_v(W, 0))
+                    elif nm in ("linear_attn.in_proj_a", "linear_attn.in_proj_b"):
+                        cands.append(self._grouped_v(W, 0, hdim=1))
                     elif nm == "linear_attn.out_proj":
                         cands.append(self._grouped_v(W, 1))
 
