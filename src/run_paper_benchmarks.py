@@ -913,6 +913,7 @@ def quantize_and_export_vtq_full(
     target_bpw: float,
     out_vtq_path: Path,
     codec: NativeVtqCodec,
+    g_provider=None,
 ) -> dict:
     dev = ev.device
     ev.restore_clean_embed_and_head()
@@ -1044,10 +1045,14 @@ def quantize_and_export_vtq_full(
                     rw = fisher[(l_idx, nm)].to(dev)
                     row_sl = assignment[(l_idx, nm)]
                     dm = 0.30 if nm.endswith(("down_proj", "o_proj", "out_proj")) else 0.20
+                    G_out = g_provider.get(l_idx, nm, W.shape[0], dev) if g_provider is not None else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1
+                        W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1,
+                        G_out=G_out, gptq2d=(G_out is not None),
+                        gptq2d_sigma_reg=g_provider.sigma_reg if g_provider is not None else 0.10,
                     )
+                    del G_out
                     wr.add_matrix(f"{lay_pfx}.{nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     quantized_source_keys.add(f"{lay_pfx}.{nm}.weight")
@@ -1097,10 +1102,14 @@ def quantize_and_export_vtq_full(
                     W = ex_obj.down_proj.data[e]
                     rw = fisher[(l_idx, full_nm)].to(dev)
                     row_sl = assignment[(l_idx, full_nm)]
+                    G_out = g_provider.get(l_idx, full_nm, W.shape[0], dev) if g_provider is not None else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, He, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1
+                        W, He, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1,
+                        G_out=G_out, gptq2d=(G_out is not None),
+                        gptq2d_sigma_reg=g_provider.sigma_reg if g_provider is not None else 0.10,
                     )
+                    del G_out
                     wr.add_matrix(f"{lay_pfx}.{full_nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     ex_obj.down_proj.data[e].copy_(w_hat.to(W.dtype))
@@ -1944,8 +1953,10 @@ def run_vtq_phase(
     results: dict,
     out_json: Path,
     work_dir: Path,
+    g_provider=None,
 ):
-    todo = [b for b in TARGET_BPWS if f"VTQ:{b:.1f}" not in results["methods"]]
+    key_prefix = "VTQ-2D" if g_provider is not None else "VTQ"
+    todo = [b for b in TARGET_BPWS if f"{key_prefix}:{b:.1f}" not in results["methods"]]
     if not todo:
         return
 
@@ -1957,9 +1968,12 @@ def run_vtq_phase(
         results["vtq_shared_profile_fisher_sec"] = prep_sec
 
     for b_tgt in todo:
-        mkey = f"VTQ:{b_tgt:.1f}"
-        vtq_file = work_dir / f"model_vtq_{b_tgt:.1f}.vtq"
-        q_meta = quantize_and_export_vtq_full(ev, cal_ids, fisher, profile, H_head, b_tgt, vtq_file, codec)
+        mkey = f"{key_prefix}:{b_tgt:.1f}"
+        file_tag = "vtq2d" if g_provider is not None else "vtq"
+        vtq_file = work_dir / f"model_{file_tag}_{b_tgt:.1f}.vtq"
+        q_meta = quantize_and_export_vtq_full(
+            ev, cal_ids, fisher, profile, H_head, b_tgt, vtq_file, codec, g_provider=g_provider
+        )
 
         loader = VtqDiskLoader(vtq_file, codec, ev.prefix, ev.tie_word_embeddings)
         ev_res = evaluate_disk_loader(ev, loader, traces, ref_final)
@@ -1967,7 +1981,7 @@ def run_vtq_phase(
         vtq_file.unlink(missing_ok=True)
 
         entry = {
-            "format": "VTQ",
+            "format": key_prefix,
             "target_bpw": b_tgt,
             **q_meta,
             **ev_res,
@@ -2017,6 +2031,9 @@ def main():
     ap.add_argument("--phases", nargs="+", choices=["vtq", "gguf", "exl3"], default=["vtq", "gguf", "exl3"])
     ap.add_argument("--target-bpws", nargs="+", type=float, default=None)
     ap.add_argument("--download-model", action="store_true", help="Automatically download the HF BF16 checkpoint if missing.")
+    ap.add_argument("--gptq2d", action="store_true", help="Opt-in: enable two-sided GPTQ-2D rounding on o_proj + down_proj (experimental).")
+    ap.add_argument("--gptq2d-hess", type=str, default=None, help="Local dir or HF repo id of 2-sided output Hessians (*_hout.pt) for --gptq2d.")
+    ap.add_argument("--gptq2d-sigma", type=float, default=0.10, help="Output Hessian ridge damping sigma_reg for --gptq2d (default: 0.10).")
     args = ap.parse_args()
     if args.target_bpws:
         global TARGET_BPWS
@@ -2078,9 +2095,21 @@ def main():
     for ph in args.phases:
         if ph == "vtq":
             codec = build_vtq_native_codec(args.work_dir)
+            g_provider = None
+            if args.gptq2d:
+                if not args.gptq2d_hess:
+                    raise ValueError("--gptq2d requires --gptq2d-hess <local_dir_or_hf_repo>")
+                from src.vtq_gptq2d import OutHessianProvider
+
+                g_provider = OutHessianProvider(
+                    args.gptq2d_hess,
+                    sigma_reg=args.gptq2d_sigma,
+                    cache_dir=m_work / "gptq2d_hess",
+                )
             run_vtq_phase(
                 ev, cal_ids, m_work / "fisher_neutral.pt", m_work / "vtq_profile.pt",
                 codec, traces, ref_final, results, out_json, m_work,
+                g_provider=g_provider,
             )
         elif ph == "gguf":
             shim = LibGgmlShim(args.llama_cpp_dir, args.work_dir)

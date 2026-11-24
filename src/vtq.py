@@ -29,6 +29,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -640,8 +641,14 @@ def quantize_matrix_vtq(
     d_sb_gecd_sweeps: Optional[int] = None,
     compact_wide_workspace: bool = False,
     row_energy_tilt: float = 0.,
+    G_out: Optional[torch.Tensor] = None,
+    gptq2d: bool = False,
+    gptq2d_sigma_reg: float = 0.10,
+    gptq2d_weight_mode: str = "dw",
 ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, float]:
-    """Quantizes `W [M, Kin]` into VTQ (auto-padding to `(16, 256)` supertile multiples if needed)."""
+    """Quantizes `W [M, Kin]` into VTQ (auto-padding to `(16, 256)` supertile multiples if needed).
+    When `gptq2d=True` and `G_out [M_orig, M_orig]` is supplied, runs opt-in two-sided `16x16`
+    super-entry GPTQ-2D rounding (`src/vtq_gptq2d.py`) without altering the `.vtq` format."""
     if not VTQ_CONFIG:
         load_and_register_vtq()
     if d_sb_gecd_sweeps is not None:
@@ -657,107 +664,133 @@ def quantize_matrix_vtq(
     assert Kin % TILE == 0, f"VTQ requires Kin % 256 == 0, got Kin={Kin}"
     nblocks = Kin // TILE
 
+    row_slices = [(0, M, spec_or_row_specs)] if isinstance(spec_or_row_specs, str) else list(spec_or_row_specs)
+    if row_slices and row_slices[-1][1] < M:
+        r0_last, _, sp_last = row_slices[-1]
+        row_slices[-1] = (r0_last, M, sp_last)
+    emit_pack = (PACK is not None) or (lv2.PACK is not None)
+    use_gptq2d = bool(gptq2d and G_out is not None)
+
     compact_wide = compact_wide_workspace and Kin >= 8192
     rot_kw = {'h_stripe': 1024} if compact_wide else {}
     W_rot, H_rot, suh = compute_suh_vtq(W_src, H_f32, seed=seed, row_weights=row_weights, rot_block=rot_block, **rot_kw)
     _mem_mark("suh_rot")
     dmean = H_rot.diagonal().mean().clamp(min=1e-8)
-    # `H_rot` is only needed afterwards by the two-sided Gauss-Seidel polish (`u_sb_gecd_sweeps > 0`); otherwise
-    # regularize it in place and free it right away (saves one `K x K` buffer at the Cholesky peak).
-    keep_h_rot = u_sb_gecd_sweeps > 0 and nblocks > 1
-    H_reg = H_rot.clone() if keep_h_rot else H_rot
-    H_reg.diagonal().add_(damp * dmean)
-    if not keep_h_rot:
-        del H_rot
-    H_flip = H_reg.flip(0, 1)
-    del H_reg
-    L_flip = torch.linalg.cholesky(H_flip)
-    del H_flip
-    _mem_mark("cholesky")
-    if compact_wide:
-        # A column-major RHS can be overwritten directly by the triangular solve.
-        rhs = torch.eye(Kin, dtype=L_flip.dtype, device=dev).T
-        U_inv_flip = torch.linalg.solve_triangular(L_flip, rhs, upper=False, out=rhs)
-        del rhs
-    else:
-        U_inv_flip = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False)
-    del L_flip
-    U_nat = U_inv_flip.flip(0, 1)
-    del U_inv_flip
-    _mem_mark("u_nat")
 
-    eye256 = torch.eye(TILE, dtype=torch.float32, device=dev).unsqueeze(0).expand(nblocks, -1, -1)
-    U_blks = torch.stack([U_nat[b * TILE : (b + 1) * TILE, b * TILE : (b + 1) * TILE] for b in range(nblocks)], dim=0)
-    U_blks_inv = torch.linalg.solve_triangular(U_blks, eye256, upper=True)
-    dw_diag = (1.0 / (torch.diagonal(U_nat) ** 2).clamp(min=1e-12)).view(nblocks, TILE).contiguous()
+    if use_gptq2d:
+        import src.vtq_gptq2d as vtq_g2d
 
-    gs_ctx = None
-    if u_sb_gecd_sweeps > 0 and nblocks > 1:
-        gs_mult = float(globals().get("_GS_MULT_OVERRIDE", 1.0))
-        H_gs = H_rot
-        H_gs.diagonal().add_(max(gs_mult * damp, 0.02) * dmean)
-        H_bb_all = torch.stack([H_gs[b * TILE : (b + 1) * TILE, b * TILE : (b + 1) * TILE] for b in range(nblocks)], dim=0)
-        U_v_all = torch.linalg.cholesky(H_bb_all.flip(1, 2)).flip(1, 2)
-        Ub_gs_all = torch.linalg.solve_triangular(U_v_all, eye256, upper=True)
-        H_bb_inv_all = torch.cholesky_inverse(torch.linalg.cholesky(H_bb_all))
-        gs_ctx = {
-            "H_gs": H_gs,
-            "H_bb_all": H_bb_all,
-            "U_v_all": U_v_all,
-            "Ub_gs_all": Ub_gs_all,
-            "H_bb_inv_all": H_bb_inv_all,
-        }
-
-    row_slices = [(0, M, spec_or_row_specs)] if isinstance(spec_or_row_specs, str) else list(spec_or_row_specs)
-    if row_slices and row_slices[-1][1] < M:
-        r0_last, _, sp_last = row_slices[-1]
-        row_slices[-1] = (r0_last, M, sp_last)
-    by_spec: Dict[str, List[Tuple[int, int]]] = {}
-    for r0, r1, sp in row_slices:
-        by_spec.setdefault(sp, []).append((r0, r1))
-
-    emit_pack = (PACK is not None) or (lv2.PACK is not None)
-    # Skip gather/scatter (and an entire second set of outputs) for a single full slice.
-    full_slice = len(row_slices) == 1 and row_slices[0][:2] == (0, M)
-    pm = None
-    if not full_slice:
-        G_nat_all = torch.empty_like(W_rot)
-        d_row_all = torch.empty((M,), dtype=torch.float16, device=dev)
-        u_sb_all = torch.empty((M, nblocks), dtype=torch.uint8, device=dev)
-        if emit_pack:
-            pm = {k: torch.empty((M, nblocks, *shape), dtype=torch.uint8, device=dev)
-                  for k, shape in (("g_sub", (16,)), ("c_all", (16, 2)), ("u_all", (256,)))}
-
-    for sp, ranges in by_spec.items():
-        rows_idx = slice(None) if full_slice else torch.cat([torch.arange(r0, r1, device=dev) for r0, r1 in ranges])
-        sub_out = _quantize_rows_vtq_ldlq(
-            W_rot[rows_idx],
-            U_nat,
-            U_blks,
-            U_blks_inv,
-            dw_diag,
-            gs_ctx,
-            sp,
+        H_rot.diagonal().add_(damp * dmean)
+        G_pad = vtq_g2d.pad_output_hessian(G_out.to(device=dev), M)
+        g2d_out = vtq_g2d.quantize_rows_vtq_gptq2d(
+            W_rot,
+            H_rot,
+            G_pad,
+            row_slices,
+            vtq_mod=sys.modules[__name__],
+            sigma_reg=gptq2d_sigma_reg,
+            weight_mode=gptq2d_weight_mode,
             emit_pack=emit_pack,
-            u_sb_gecd_sweeps=u_sb_gecd_sweeps,
         )
-        if full_slice:
-            G_nat_all, d_row_all, u_sb_all = sub_out["G_nat"], sub_out["d_row"], sub_out["u_sb"]
-            if emit_pack:
-                pm = {k: sub_out[k] for k in ("g_sub", "c_all", "u_all")}
-            del sub_out
-            break
-        G_nat_all[rows_idx] = sub_out["G_nat"]
-        d_row_all[rows_idx] = sub_out["d_row"]
-        u_sb_all[rows_idx] = sub_out["u_sb"]
-        if pm is not None:
-            pm["g_sub"][rows_idx] = sub_out["g_sub"]
-            pm["c_all"][rows_idx] = sub_out["c_all"]
-            pm["u_all"][rows_idx] = sub_out["u_all"]
-        del sub_out
+        del H_rot, G_pad, W_rot
+        G_nat_all = g2d_out["G_nat"]
+        d_row_all = g2d_out["d_row"]
+        u_sb_all = g2d_out["u_sb"]
+        pm = {k: g2d_out[k] for k in ("g_sub", "c_all", "u_all")} if emit_pack else None
+        del g2d_out
+        _mem_mark("ldlq")
+    else:
+        # `H_rot` is only needed afterwards by the two-sided Gauss-Seidel polish (`u_sb_gecd_sweeps > 0`); otherwise
+        # regularize it in place and free it right away (saves one `K x K` buffer at the Cholesky peak).
+        keep_h_rot = u_sb_gecd_sweeps > 0 and nblocks > 1
+        H_reg = H_rot.clone() if keep_h_rot else H_rot
+        H_reg.diagonal().add_(damp * dmean)
+        if not keep_h_rot:
+            del H_rot
+        H_flip = H_reg.flip(0, 1)
+        del H_reg
+        L_flip = torch.linalg.cholesky(H_flip)
+        del H_flip
+        _mem_mark("cholesky")
+        if compact_wide:
+            # A column-major RHS can be overwritten directly by the triangular solve.
+            rhs = torch.eye(Kin, dtype=L_flip.dtype, device=dev).T
+            U_inv_flip = torch.linalg.solve_triangular(L_flip, rhs, upper=False, out=rhs)
+            del rhs
+        else:
+            U_inv_flip = torch.linalg.solve_triangular(L_flip, torch.eye(Kin, dtype=L_flip.dtype, device=dev), upper=False)
+        del L_flip
+        U_nat = U_inv_flip.flip(0, 1)
+        del U_inv_flip
+        _mem_mark("u_nat")
 
-    del U_nat, U_blks, U_blks_inv, gs_ctx, W_rot
-    _mem_mark("ldlq")
+        eye256 = torch.eye(TILE, dtype=torch.float32, device=dev).unsqueeze(0).expand(nblocks, -1, -1)
+        U_blks = torch.stack([U_nat[b * TILE : (b + 1) * TILE, b * TILE : (b + 1) * TILE] for b in range(nblocks)], dim=0)
+        U_blks_inv = torch.linalg.solve_triangular(U_blks, eye256, upper=True)
+        dw_diag = (1.0 / (torch.diagonal(U_nat) ** 2).clamp(min=1e-12)).view(nblocks, TILE).contiguous()
+
+        gs_ctx = None
+        if u_sb_gecd_sweeps > 0 and nblocks > 1:
+            gs_mult = float(globals().get("_GS_MULT_OVERRIDE", 1.0))
+            H_gs = H_rot
+            H_gs.diagonal().add_(max(gs_mult * damp, 0.02) * dmean)
+            H_bb_all = torch.stack([H_gs[b * TILE : (b + 1) * TILE, b * TILE : (b + 1) * TILE] for b in range(nblocks)], dim=0)
+            U_v_all = torch.linalg.cholesky(H_bb_all.flip(1, 2)).flip(1, 2)
+            Ub_gs_all = torch.linalg.solve_triangular(U_v_all, eye256, upper=True)
+            H_bb_inv_all = torch.cholesky_inverse(torch.linalg.cholesky(H_bb_all))
+            gs_ctx = {
+                "H_gs": H_gs,
+                "H_bb_all": H_bb_all,
+                "U_v_all": U_v_all,
+                "Ub_gs_all": Ub_gs_all,
+                "H_bb_inv_all": H_bb_inv_all,
+            }
+
+        by_spec: Dict[str, List[Tuple[int, int]]] = {}
+        for r0, r1, sp in row_slices:
+            by_spec.setdefault(sp, []).append((r0, r1))
+
+        # Skip gather/scatter (and an entire second set of outputs) for a single full slice.
+        full_slice = len(row_slices) == 1 and row_slices[0][:2] == (0, M)
+        pm = None
+        if not full_slice:
+            G_nat_all = torch.empty_like(W_rot)
+            d_row_all = torch.empty((M,), dtype=torch.float16, device=dev)
+            u_sb_all = torch.empty((M, nblocks), dtype=torch.uint8, device=dev)
+            if emit_pack:
+                pm = {k: torch.empty((M, nblocks, *shape), dtype=torch.uint8, device=dev)
+                      for k, shape in (("g_sub", (16,)), ("c_all", (16, 2)), ("u_all", (256,)))}
+
+        for sp, ranges in by_spec.items():
+            rows_idx = slice(None) if full_slice else torch.cat([torch.arange(r0, r1, device=dev) for r0, r1 in ranges])
+            sub_out = _quantize_rows_vtq_ldlq(
+                W_rot[rows_idx],
+                U_nat,
+                U_blks,
+                U_blks_inv,
+                dw_diag,
+                gs_ctx,
+                sp,
+                emit_pack=emit_pack,
+                u_sb_gecd_sweeps=u_sb_gecd_sweeps,
+            )
+            if full_slice:
+                G_nat_all, d_row_all, u_sb_all = sub_out["G_nat"], sub_out["d_row"], sub_out["u_sb"]
+                if emit_pack:
+                    pm = {k: sub_out[k] for k in ("g_sub", "c_all", "u_all")}
+                del sub_out
+                break
+            G_nat_all[rows_idx] = sub_out["G_nat"]
+            d_row_all[rows_idx] = sub_out["d_row"]
+            u_sb_all[rows_idx] = sub_out["u_sb"]
+            if pm is not None:
+                pm["g_sub"][rows_idx] = sub_out["g_sub"]
+                pm["c_all"][rows_idx] = sub_out["c_all"]
+                pm["u_all"][rows_idx] = sub_out["u_all"]
+            del sub_out
+
+        del U_nat, U_blks, U_blks_inv, gs_ctx, W_rot
+        _mem_mark("ldlq")
 
     # Exact bit-accurate reconstruction + `VTQ_REFIT_SWEEPS` alternating `(c_row -> d_row, suh)` global refit sweeps:
     suh_fp16 = suh.to(torch.float16)
@@ -778,7 +811,9 @@ def quantize_matrix_vtq(
         rw = None
 
     # Two sweeps give the same SNR as one (<= 0.001 bit on 12 real Llama-3.2-3B matrices) for ~+20% encoder time on wide `K`.
-    for _ in range(int(os.environ.get("VTQ_REFIT_SWEEPS", "1"))):
+    # Under two-sided `gptq2d`, skip 1-sided post-refit because it undoes cross-row error cancellation (`exp32`).
+    n_refit_sweeps = 0 if use_gptq2d else int(os.environ.get("VTQ_REFIT_SWEEPS", "1"))
+    for _ in range(n_refit_sweeps):
         c_row = (W_hat_eff * HW).sum(dim=1) / (W_hat_eff * HQ).sum(dim=1).clamp(min=1e-12)
         c_row = torch.where(torch.isfinite(c_row) & (c_row > 0.5) & (c_row < 2.0), c_row, torch.ones_like(c_row))
         d_row_cand = (d_row_all.float() * c_row).to(torch.float16)
@@ -1681,13 +1716,27 @@ def quantize_llama_model_vtq(
     down_output_fit=None,
     reuse_reference_mlp: bool = False,
     compact_gptaq: bool = False,
+    gptq2d: bool = False,
+    gptq2d_hess_source: Optional[str | Path | Dict[Tuple[int, str], torch.Tensor]] = None,
+    gptq2d_sigma_reg: float = 0.10,
+    gptq2d_targets: Tuple[str, ...] = ("self_attn.o_proj", "mlp.down_proj"),
+    gptq2d_weight_mode: str = "dw",
 ) -> dict:
-    """Layer-by-layer streaming VTQ quantizer with asymmetric `GPTAQ` (`Qwen` QK-Norm safe via `sq._attn`)
-    and optional `O(1)`-layer gradient-checkpointed scale polish."""
+    """Layer-by-layer streaming VTQ quantizer with asymmetric `GPTAQ` (`Qwen` QK-Norm safe via `sq._attn`),
+    optional opt-in two-sided `GPTQ-2D` (`gptq2d=True`, `gptq2d_hess_source=...`), and optional `O(1)`-layer
+    gradient-checkpointed scale polish."""
     if not VTQ_CONFIG:
         load_and_register_vtq()
 
     import src.streaming_quant as sq
+
+    g_provider = None
+    if gptq2d:
+        if gptq2d_hess_source is None:
+            raise ValueError("`gptq2d=True` requires `gptq2d_hess_source` (local dir, HF repo id, or dict of G_out)")
+        from src.vtq_gptq2d import OutHessianProvider
+
+        g_provider = OutHessianProvider(gptq2d_hess_source, targets=gptq2d_targets, sigma_reg=gptq2d_sigma_reg)
 
     t_start = time.perf_counter()
     device = next(model.parameters()).device
@@ -1736,10 +1785,14 @@ def quantize_llama_model_vtq(
                 W_tgt = _drift_target(W, B, eff_gptaq)
             sr = fisher_out[(l_idx, full_name)].to(device)
             rb = resolve_rot_block(full_name, rot_block=rot_block, rot_mode=rot_mode)
+            G_out = g_provider.get(l_idx, full_name, M_r, device) if g_provider is not None else None
             _, w_hat, _ = quantize_matrix_vtq(
                 W, H, r_specs, seed=seed_i, damp=damp * dm, row_weights=sr,
                 rot_block=rb, W_target=W_tgt, u_sb_gecd_sweeps=d_sb_gecd_sweeps,
+                G_out=G_out, gptq2d=(G_out is not None),
+                gptq2d_sigma_reg=gptq2d_sigma_reg, gptq2d_weight_mode=gptq2d_weight_mode,
             )
+            del G_out
             mod.weight.data.copy_(w_hat.to(dtype=dtype, device=device))
             for r0, r1, sp in r_specs:
                 n_p = (r1 - r0) * K_in
@@ -1952,13 +2005,41 @@ def install_vtq_hooks():
             return spec[0][2] in VTQ_CONFIG
         return False
 
+    _hook_g_provider = [None]
+
+    def _get_hook_g_provider():
+        if os.environ.get("VTQ_GPTQ2D", "0") != "1":
+            return None
+        if _hook_g_provider[0] is None:
+            src_h = os.environ.get("VTQ_GPTQ2D_HESS", "")
+            if not src_h:
+                raise ValueError("VTQ_GPTQ2D=1 requires VTQ_GPTQ2D_HESS=<local_dir_or_hf_repo>")
+            from src.vtq_gptq2d import DEFAULT_GPTQ2D_SIGMA_REG, DEFAULT_GPTQ2D_TARGETS, OutHessianProvider
+
+            tgts_env = os.environ.get("VTQ_GPTQ2D_TARGETS", "")
+            tgts = tuple(t.strip() for t in tgts_env.split(",") if t.strip()) if tgts_env else DEFAULT_GPTQ2D_TARGETS
+            sig = float(os.environ.get("VTQ_GPTQ2D_SIGMA", str(DEFAULT_GPTQ2D_SIGMA_REG)))
+            _hook_g_provider[0] = OutHessianProvider(src_h, targets=tgts, sigma_reg=sig)
+        return _hook_g_provider[0]
+
     def _patched_quant(W: torch.Tensor, H: torch.Tensor, spec, seed: int, damp: float, full: str | None = None) -> torch.Tensor:
         if _is_vtq(spec):
             rw = sqm._row_w(full, W.device) if full else None
             vtq_damp = damp * 10.0 if damp < 0.08 else damp
             rot_mode = os.environ.get("VTQ_ROT_MODE", "outer")
             rb = resolve_rot_block(full, rot_block=-1, rot_mode=rot_mode)
-            _, w_hat, _ = quantize_matrix_vtq(W, H, spec, seed=seed, damp=vtq_damp, row_weights=rw, rot_block=rb)
+            gp = _get_hook_g_provider()
+            G_out = None
+            if gp is not None and full:
+                cur_l = sqm._CUR_LAYER[0] if hasattr(sqm, "_CUR_LAYER") and sqm._CUR_LAYER else None
+                if cur_l is not None:
+                    G_out = gp.get(cur_l, full, W.shape[0], W.device)
+            _, w_hat, _ = quantize_matrix_vtq(
+                W, H, spec, seed=seed, damp=vtq_damp, row_weights=rw, rot_block=rb,
+                G_out=G_out, gptq2d=(G_out is not None),
+                gptq2d_sigma_reg=gp.sigma_reg if gp is not None else 0.10,
+            )
+            del G_out
             return w_hat.to(W.dtype)
         return orig_quant(W, H, spec, seed, damp, full)
 
