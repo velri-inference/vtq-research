@@ -31,7 +31,7 @@ Raw JSON: [`results/paper_llama31_8b.json`](../../results/paper_llama31_8b.json)
 | `EXL3:6.0` | `5.9681` | `5.9579` | `350.6 s` | `0.00200` / `0.00259` / `0.00216` | `+0.0063` / `+0.0058` / **`+0.0054`** |
 | `GGUF:Q6_K` | `6.5712` | `6.5625` | `15.7 s`* | `0.00248` / `0.00275` / `0.00358` | `+0.0071` / `+0.0060` / `+0.0245` |
 
-*\*Excluding shared `llama-imatrix` pass (`310.7 s`).*
+*\*Excluding shared `llama-imatrix` pass (`84.1 s`) and shared `VTQ` Fisher + slice profile (`22.3 s`).*
 
 ---
 
@@ -84,3 +84,24 @@ Raw JSON: [`results/paper_qwen36_35b.json`](../../results/paper_qwen36_35b.json)
 | `GGUF:Q6_K` | `6.5813` | `6.5626` | `320.1 s`* | `0.00457` / `0.00480` / `0.00867` | `-0.0005` / `+0.0022` / `-0.0095` |
 
 *\*Excluding shared `llama-imatrix` pass (`340.8 s`) and shared `VTQ` Fisher + slice profile (`128.1 s`).*
+
+
+---
+
+## Quantization Creation Time (`NVIDIA RTX PRO 6000 Blackwell Server Edition`)
+
+All quantizations were executed on a single `NVIDIA RTX PRO 6000 Blackwell Server Edition` (`96 GB` VRAM). Both `VTQ` (`Fisher + slice distortion profile`) and `GGUF` (`llama-imatrix`) reuse a single shared calibration pass across all bitrates of a model, whereas `EXL3` (`exllamav3/convert.py`) captures layer Hessians inline during each conversion run.
+
+![Quantization Creation Time and Speedup vs EXL3](../figures/paper_quant_time.svg)
+
+| Model | Shared `1×` Prep (`VTQ` / `GGUF`) | `2.5 bpw` (`VTQ` vs `EXL3`) | `3.5 bpw` (`VTQ` vs `EXL3`) | `4.5 bpw` (`VTQ` vs `EXL3`) | `6.0 bpw` (`VTQ` vs `EXL3`) | Full 4-Bitrate Suite incl. `1×` Prep (`VTQ` vs `EXL3`) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`Llama-3.1-8B-Instruct`** | `22.3 s` / `84.1 s` | **`158.5 s`** vs `527.5 s` (**`3.3×`**) | **`199.3 s`** vs `526.5 s` (**`2.6×`**) | **`211.1 s`** vs `347.3 s` (**`1.6×`**) | **`237.3 s`** vs `350.6 s` (**`1.5×`**) | **`13.8 min`** vs `29.2 min` (**`2.1×`**) |
+| **`gemma-4-26B-A4B-it`** | `57.4 s` / `118.5 s` | **`431.8 s`** vs `1811.4 s` (**`4.2×`**) | **`483.1 s`** vs `1437.4 s` (**`3.0×`**) | **`523.9 s`** vs `1572.0 s` (**`3.0×`**) | `1314.6 s` vs **`1245.2 s`** (`0.9×`) | **`46.8 min`** vs `101.1 min` (**`2.2×`**) |
+| **`Qwen3.6-35B-A3B`** | `128.1 s` / `340.8 s` | **`791.2 s`** vs `4014.0 s` (**`5.1×`**) | **`904.0 s`** vs `3905.6 s` (**`4.3×`**) | **`919.5 s`** vs `1930.2 s` (**`2.1×`**) | **`1459.7 s`** vs `1914.2 s` (**`1.3×`**) | **`70.0 min`** vs `196.1 min` (**`2.8×`**) |
+
+---
+
+## Reproducing All Benchmarks & Figures
+
+All SVG/PNG figures in `docs/figures/` can be regenerated directly on `main` from `results/paper_*.json` via `python -m src.plot_paper_benchmarks`. For full end-to-end re-execution from BF16 checkpoints — including the tracked held-out evaluation traces (`data/`), `SHA-256` manifest, and step-by-step `llama.cpp` / `exllamav3` build instructions — switch to the [`paper-repro`](https://github.com/velri-inference/vtq-research/tree/paper-repro) branch (`git checkout paper-repro`).

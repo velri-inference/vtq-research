@@ -1,5 +1,7 @@
 # Model weights, quants and third-party builds: not in the repo
 models/
+third_party/
+work_paper/
 exl3_out/
 exl3_tmp*/
 gguf_*/

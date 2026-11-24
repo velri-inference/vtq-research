@@ -238,7 +238,13 @@ def prepare_neutral_cal_and_traces(
             if is_gemma4
             else []
         )
-        raw_test = (ROOT / "data" / "wikitext2_test.raw").read_text(encoding="utf-8")
+        wt2_raw_path = ROOT / "data" / "wikitext2_test.raw"
+        if wt2_raw_path.exists():
+            raw_test = wt2_raw_path.read_text(encoding="utf-8")
+        else:
+            from datasets import load_dataset
+            ds_test = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+            raw_test = "\n".join(ds_test["text"])
         test_ids = tok.encode(raw_test, add_special_tokens=False)
         eval_seqs = []
         for i in range(40):
@@ -2002,14 +2008,15 @@ def compute_summary_comparisons(results: dict):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="End-to-end VTQ vs EXL3 vs GGUF paper benchmark suite.")
     ap.add_argument("--model", choices=sorted(MODEL_SPECS), required=True)
-    ap.add_argument("--models-root", type=Path, default=ROOT / "models")
-    ap.add_argument("--llama-cpp-dir", type=Path, default=Path("/content/llama.cpp"))
-    ap.add_argument("--exl3-dir", type=Path, default=Path("/content/exllamav3"))
-    ap.add_argument("--work-dir", type=Path, default=Path("/content/work_paper"))
+    ap.add_argument("--models-root", type=Path, default=Path(os.environ.get("VTQ_MODELS_DIR", ROOT / "models")))
+    ap.add_argument("--llama-cpp-dir", type=Path, default=Path(os.environ.get("VTQ_LLAMA_CPP_DIR", ROOT / "third_party" / "llama.cpp")))
+    ap.add_argument("--exl3-dir", type=Path, default=Path(os.environ.get("VTQ_EXL3_DIR", ROOT / "third_party" / "exllamav3")))
+    ap.add_argument("--work-dir", type=Path, default=Path(os.environ.get("VTQ_WORK_DIR", ROOT / "work_paper")))
     ap.add_argument("--phases", nargs="+", choices=["vtq", "gguf", "exl3"], default=["vtq", "gguf", "exl3"])
     ap.add_argument("--target-bpws", nargs="+", type=float, default=None)
+    ap.add_argument("--download-model", action="store_true", help="Automatically download the HF BF16 checkpoint if missing.")
     args = ap.parse_args()
     if args.target_bpws:
         global TARGET_BPWS
@@ -2017,6 +2024,26 @@ def main():
 
     spec = MODEL_SPECS[args.model]
     model_dir = args.models_root / spec["local_name"]
+    if not (model_dir / "config.json").exists():
+        if args.download_model:
+            from huggingface_hub import snapshot_download
+            model_dir.parent.mkdir(parents=True, exist_ok=True)
+            last_err = None
+            for repo_id in spec["hf_repos"].split("|"):
+                try:
+                    print(f"=== Downloading `{repo_id}` -> {model_dir} ===", flush=True)
+                    snapshot_download(repo_id=repo_id, local_dir=str(model_dir), ignore_patterns=["*.pth", "original/*"])
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"  [Candidate `{repo_id}` failed: {e}]", flush=True)
+            if last_err is not None:
+                raise last_err
+        else:
+            raise FileNotFoundError(
+                f"Model directory not found: {model_dir}. Pass `--download-model` or set `--models-root`."
+            )
     out_json: Path = spec["out_json"]
     out_json.parent.mkdir(parents=True, exist_ok=True)
     m_work = args.work_dir / args.model
