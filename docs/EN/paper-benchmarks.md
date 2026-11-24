@@ -104,4 +104,56 @@ All quantizations were executed on a single `NVIDIA RTX PRO 6000 Blackwell Serve
 
 ## Reproducing All Benchmarks & Figures
 
-All SVG/PNG figures in `docs/figures/` can be regenerated directly on `main` from `results/paper_*.json` via `python -m src.plot_paper_benchmarks`. For full end-to-end re-execution from BF16 checkpoints — including the tracked held-out evaluation traces (`data/`), `SHA-256` manifest, and step-by-step `llama.cpp` / `exllamav3` build instructions — switch to the [`paper-repro`](https://github.com/velri-inference/vtq-research/tree/paper-repro) branch (`git checkout paper-repro`).
+All held-out evaluation traces (`data/wikitext2_test.raw` and `data/{,gemma4/,qwen35/}{nemotron,multilingual}_trace.json`), benchmark runners ([`src/run_paper_benchmarks.py`](../../src/run_paper_benchmarks.py)), raw JSON outputs (`results/paper_*.json`), and plotting scripts ([`src/plot_paper_benchmarks.py`](../../src/plot_paper_benchmarks.py)) are tracked directly in this repository. Neutral calibration (`Salesforce/wikitext` `wikitext-2-raw-v1` `train`, `64 × 2048` tokens) and BF16 checkpoints are fetched automatically from Hugging Face.
+
+### 1. Verify Evaluation Trace Checksums (`SHA-256`)
+
+```bash
+sha256sum \
+  data/wikitext2_test.raw \
+  data/nemotron_trace.json \
+  data/multilingual_trace.json \
+  data/gemma4/nemotron_trace.json \
+  data/gemma4/multilingual_trace.json \
+  data/qwen35/nemotron_trace.json \
+  data/qwen35/multilingual_trace.json
+```
+
+Expected digests:
+- `bbf94c53a05abe9ee670d3b6343608095822c85e26de37c70b24fc571964574a  data/wikitext2_test.raw`
+- `d4b1a01630b7a77d9aeba97d216399a5cb2d4950516c31d0feab19ae6c9c478a  data/nemotron_trace.json`
+- `e838cb32b6b0589327628ed166a6c9d0f7629109fdb0b09a29e29a0edba4e671  data/multilingual_trace.json`
+- `420441e9d32fd97ead09e251f4c94909d5b6eeb7a4cb7f5837a5383436883df2  data/gemma4/nemotron_trace.json`
+- `5a0e9263bb4a08c715b90c435b9f04ac8b8a1560e54fb2e90b66e0934a14a422  data/gemma4/multilingual_trace.json`
+- `2bec32b0adcf132ef64f1c2668285853a91db07ee7a986ff53edb0d79ee4b743  data/qwen35/nemotron_trace.json`
+- `ba6da137055cdfa1fc7f0099dbf5c29e6aa8d5fde12e3069b591c874dab7e5aa  data/qwen35/multilingual_trace.json`
+
+### 2. Regenerate All Figures from Existing `results/paper_*.json`
+
+```bash
+python -m src.plot_paper_benchmarks
+```
+
+### 3. Run the Full End-to-End Quantization & Evaluation Suite from Scratch
+
+```bash
+# 1. Python dependencies (CUDA PyTorch + nvcc in PATH)
+pip install -U "transformers>=5.10.0" accelerate datasets safetensors huggingface_hub \
+  rich pyyaml marisa_trie pydantic llguidance ninja sentencepiece protobuf matplotlib
+pip install flash-linear-attention  # optional fast path for Qwen3.6 Gated DeltaNet
+
+# 2. Build upstream llama.cpp (for GGUF conversion, imatrix, quantization, and libggml-base.so)
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git third_party/llama.cpp
+cmake -S third_party/llama.cpp -B third_party/llama.cpp/build -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+cmake --build third_party/llama.cpp/build --config Release --target llama-imatrix llama-quantize ggml-base -j $(nproc)
+pip install --no-deps -e third_party/llama.cpp/gguf-py
+
+# 3. Clone & build upstream ExLlamaV3 C++/CUDA extension (for EXL3 mul1 conversion & reconstruction)
+git clone --depth 1 https://github.com/turboderp-org/exllamav3.git third_party/exllamav3
+PYTHONPATH=third_party/exllamav3 python -c "from exllamav3.ext import exllamav3_ext"
+
+# 4. Run any model (or single format/bitrate subset) — downloads BF16 weights if missing
+python -m src.run_paper_benchmarks --model llama31_8b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model gemma4_26b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model qwen36_35b --download-model --phases vtq gguf exl3
+```

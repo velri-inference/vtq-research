@@ -7,8 +7,19 @@ exl3_tmp*/
 gguf_*/
 quants/
 llama-iqk/
-# Traces and calibration (derived from external datasets; built by src/prepare_traces.py)
-data/
+# Calibration binaries and Fisher caches in data/ (held-out paper eval traces are tracked!)
+data/*
+!data/wikitext2_test.raw
+!data/nemotron_trace.json
+!data/multilingual_trace.json
+!data/gemma4/
+data/gemma4/*
+!data/gemma4/nemotron_trace.json
+!data/gemma4/multilingual_trace.json
+!data/qwen35/
+data/qwen35/*
+!data/qwen35/nemotron_trace.json
+!data/qwen35/multilingual_trace.json
 # Build
 __pycache__/
 *.pyc

@@ -104,4 +104,56 @@
 
 ## Полное воспроизведение бенчмарков и графиков
 
-Все графики `SVG/PNG` в `docs/figures/` пересобираются прямо на `main` из `results/paper_*.json` командой `python -m src.plot_paper_benchmarks`. Для полного сквозного перезапуска с нуля по BF16-чекпоинтам — включая версионированные отложенные трейсы (`data/`), `SHA-256` манифест и пошаговую сборку `llama.cpp` / `exllamav3` — переключитесь на ветку [`paper-repro`](https://github.com/velri-inference/vtq-research/tree/paper-repro) (`git checkout paper-repro`).
+Все отложенные проверочные трейсы (`data/wikitext2_test.raw` и `data/{,gemma4/,qwen35/}{nemotron,multilingual}_trace.json`), единый раннер ([`src/run_paper_benchmarks.py`](../../src/run_paper_benchmarks.py)), сырые JSON-результаты (`results/paper_*.json`) и генератор графиков ([`src/plot_paper_benchmarks.py`](../../src/plot_paper_benchmarks.py)) включены прямо в репозиторий. Нейтральная калибровка (`Salesforce/wikitext` `wikitext-2-raw-v1` `train`, `64 × 2048` токенов) и BF16-веса моделей автоматически скачиваются с Hugging Face.
+
+### 1. Проверка контрольных сумм трейсов (`SHA-256`)
+
+```bash
+sha256sum \
+  data/wikitext2_test.raw \
+  data/nemotron_trace.json \
+  data/multilingual_trace.json \
+  data/gemma4/nemotron_trace.json \
+  data/gemma4/multilingual_trace.json \
+  data/qwen35/nemotron_trace.json \
+  data/qwen35/multilingual_trace.json
+```
+
+Эталонные хеши:
+- `bbf94c53a05abe9ee670d3b6343608095822c85e26de37c70b24fc571964574a  data/wikitext2_test.raw`
+- `d4b1a01630b7a77d9aeba97d216399a5cb2d4950516c31d0feab19ae6c9c478a  data/nemotron_trace.json`
+- `e838cb32b6b0589327628ed166a6c9d0f7629109fdb0b09a29e29a0edba4e671  data/multilingual_trace.json`
+- `420441e9d32fd97ead09e251f4c94909d5b6eeb7a4cb7f5837a5383436883df2  data/gemma4/nemotron_trace.json`
+- `5a0e9263bb4a08c715b90c435b9f04ac8b8a1560e54fb2e90b66e0934a14a422  data/gemma4/multilingual_trace.json`
+- `2bec32b0adcf132ef64f1c2668285853a91db07ee7a986ff53edb0d79ee4b743  data/qwen35/nemotron_trace.json`
+- `ba6da137055cdfa1fc7f0099dbf5c29e6aa8d5fde12e3069b591c874dab7e5aa  data/qwen35/multilingual_trace.json`
+
+### 2. Перегенерация всех графиков из готовых `results/paper_*.json`
+
+```bash
+python -m src.plot_paper_benchmarks
+```
+
+### 3. Полный перезапуск квантизации и оценки с нуля
+
+```bash
+# 1. Python-зависимости (CUDA PyTorch + nvcc в PATH)
+pip install -U "transformers>=5.10.0" accelerate datasets safetensors huggingface_hub \
+  rich pyyaml marisa_trie pydantic llguidance ninja sentencepiece protobuf matplotlib
+pip install flash-linear-attention  # опциональное ускорение Gated DeltaNet для Qwen3.6
+
+# 2. Сборка upstream llama.cpp (конвертация GGUF, imatrix, квантизация и libggml-base.so)
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git third_party/llama.cpp
+cmake -S third_party/llama.cpp -B third_party/llama.cpp/build -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+cmake --build third_party/llama.cpp/build --config Release --target llama-imatrix llama-quantize ggml-base -j $(nproc)
+pip install --no-deps -e third_party/llama.cpp/gguf-py
+
+# 3. Сборка upstream ExLlamaV3 (конвертация и реконструкция EXL3 mul1)
+git clone --depth 1 https://github.com/turboderp-org/exllamav3.git third_party/exllamav3
+PYTHONPATH=third_party/exllamav3 python -c "from exllamav3.ext import exllamav3_ext"
+
+# 4. Запуск любой модели (или отдельных форматов/битрейтов) с автозагрузкой BF16-чекпоинта
+python -m src.run_paper_benchmarks --model llama31_8b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model gemma4_26b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model qwen36_35b --download-model --phases vtq gguf exl3
+```

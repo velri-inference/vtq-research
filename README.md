@@ -51,16 +51,21 @@ Constraints held constant from the start: fast decoding on both GPU and AVX2 CPU
 | [`src/cpu/vtq_avx2_bench.c`](src/cpu/vtq_avx2_bench.c), [`src/cuda/vtq_matvec_bench.cu`](src/cuda/vtq_matvec_bench.cu) | **VTQ** single-thread AVX2 (`-mno-avx512f`) and CUDA `sm_120` FP32 / DP4A GEMV & GEMM decode kernels |
 | [`src/vtq_native.py`](src/vtq_native.py), `src/native/vtq_*tiles.cpp`, [`docs/EN/vtq-native-io.md`](docs/EN/vtq-native-io.md) ([RU](docs/RU/vtq-native-io.md)) | Optional C++17 tile packer/unpacker accelerating Python FP32 weight materialization by `6.2–8.3×` |
 | [`src/tcq_proto.py`](src/tcq_proto.py), `src/cuda/tcq_viterbi.cu` | CUDA radix-4 Viterbi & causal `Block16-LDLQ` trellis encoders, codebook training, Gaussian R(D) rig |
-| [`src/eval_kld.py`](src/eval_kld.py), [`src/prepare_traces.py`](src/prepare_traces.py) | Teacher-forced KLD / Perplexity evaluator (`B = 2000` paired bootstrap) and evaluation trace builder |
+| [`src/eval_kld.py`](src/eval_kld.py), [`src/prepare_traces.py`](src/prepare_traces.py), `data/` | Teacher-forced KLD / Perplexity evaluator (`B = 2000` paired bootstrap) and tracked held-out evaluation traces |
 | [`src/hybrid_quant.py`](src/hybrid_quant.py), [`src/streaming_quant.py`](src/streaming_quant.py), [`src/gguf_utils.py`](src/gguf_utils.py) | Layer-streaming model loaders/evaluators and GGUF / `libggml` utilities (including legacy PR `#30715` `IQ2_K..IQ6_K` support) |
 | `src/iqk_format.py`, `src/liqk_v2.py`, `src/ltq_format.py`, `src/q4v.py` | Earlier research prototypes (`.liqk v1` on `IQ*_K`, `.liqk v2`, `LTQ`, and experimental non-trellis `Q4V1`) |
 | [`results/`](results/), [`docs/figures/`](docs/figures/) | Raw benchmark JSON artifacts (`paper_*.json`, kernel speed, selftests) and publication SVG/PNG charts |
 
 ## Quick Start & Reproducing
 
-`main` keeps `data/` untracked; the complete turnkey reproduction setup with tracked held-out evaluation traces (`data/wikitext2_test.raw` and `data/{,gemma4/,qwen35/}{nemotron,multilingual}_trace.json`), `SHA-256` checksums, and step-by-step instructions lives on the [`paper-repro`](https://github.com/velri-inference/vtq-research/tree/paper-repro) branch (`git checkout paper-repro`).
+Held-out evaluation traces (`data/wikitext2_test.raw` and `data/{,gemma4/,qwen35/}{nemotron,multilingual}_trace.json`) are tracked directly in git; neutral `wikitext-2-raw-v1` `train` calibration and BF16 model checkpoints are downloaded automatically from Hugging Face. See [`docs/EN/paper-benchmarks.md`](docs/EN/paper-benchmarks.md#reproducing-all-benchmarks--figures) ([RU](docs/RU/paper-benchmarks.md#полное-воспроизведение-бенчмарков-и-графиков)) for full `llama.cpp` and `exllamav3` setup steps.
 
 ```bash
 python -m src.vtq_format              # .vtq v2 container & 16x256 supertile round-trip self-test
 python -m src.plot_paper_benchmarks   # regenerate all SVG/PNG figures in docs/figures/ from results/paper_*.json
+
+# End-to-end neutral-calibration benchmarks (VTQ + GGUF + EXL3 across 2.5, 3.5, 4.5, 6.0 bpw)
+python -m src.run_paper_benchmarks --model llama31_8b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model gemma4_26b --download-model --phases vtq gguf exl3
+python -m src.run_paper_benchmarks --model qwen36_35b --download-model --phases vtq gguf exl3
 ```
