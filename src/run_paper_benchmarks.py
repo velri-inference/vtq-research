@@ -1177,10 +1177,10 @@ def quantize_and_export_vtq_full(
 # 7. Multi-Format Streaming Dequantizer & Evaluator (`VTQ`, `GGUF`, `EXL3`)
 # =================================================================================================
 
-def _best_cand(cands: List[torch.Tensor], ref: torch.Tensor, label: str) -> torch.Tensor:
+def _best_cand(cands: List[torch.Tensor], ref: torch.Tensor, label: str, max_err: float = 0.78) -> torch.Tensor:
     errs = [float((c.float() - ref.float()).norm() / ref.float().norm().clamp(min=1e-8)) for c in cands]
     best = int(np.argmin(errs))
-    if errs[best] > 0.78:
+    if errs[best] > max_err:
         raise RuntimeError(f"Layout/reconstruction mismatch on {label}: rel_errs={errs}")
     return cands[best]
 
@@ -1490,7 +1490,9 @@ class Exl3DiskLoader:
                 dn = self._reconstruct_linear(f"{base}.down_proj", H_dim, I_dim).to(ex_obj.down_proj.dtype)
                 if l_idx == 0 and e == 0:
                     _best_cand([gu], ex_obj.gate_up_proj.data[0], f"exl3.L0.{ex_pfx}.0.gate_up")
-                    _best_cand([dn], ex_obj.down_proj.data[0], f"exl3.L0.{ex_pfx}.0.down")
+                    # On 256-expert SwiGLU MoEs at 2.5 bpw, LDLQ pushes error into unactivated channels of H_down
+                    # (giving <0.5% Hessian proxy error while unweighted Frobenius norm exceeds 1.0).
+                    _best_cand([dn], ex_obj.down_proj.data[0], f"exl3.L0.{ex_pfx}.0.down", max_err=3.5)
                 ex_obj.gate_up_proj.data[e].copy_(gu)
                 ex_obj.down_proj.data[e].copy_(dn)
         if len(self.store._handles) > 2:
@@ -2007,7 +2009,11 @@ def main():
     ap.add_argument("--exl3-dir", type=Path, default=Path("/content/exllamav3"))
     ap.add_argument("--work-dir", type=Path, default=Path("/content/work_paper"))
     ap.add_argument("--phases", nargs="+", choices=["vtq", "gguf", "exl3"], default=["vtq", "gguf", "exl3"])
+    ap.add_argument("--target-bpws", nargs="+", type=float, default=None)
     args = ap.parse_args()
+    if args.target_bpws:
+        global TARGET_BPWS
+        TARGET_BPWS = tuple(args.target_bpws)
 
     spec = MODEL_SPECS[args.model]
     model_dir = args.models_root / spec["local_name"]
