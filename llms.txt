@@ -1,0 +1,43 @@
+# VTQ — Velri Trellis Quant
+
+> VTQ (Velri Trellis Quant, `.vtq` v2) is a hardware-co-designed trellis weight quantization format for Large Language Models (LLMs), built around self-contained `16×256` (4,096-weight) supertiles (`1.5–6.0 bpw`) targeting both AVX2 CPUs (`vpshufb`, without AVX-512) and GPUs (`FP32` and `DP4A INT8`). Developed for the Velri inference engine (`velri-inference`).
+
+## Canonical Facts
+
+- **Format & container:** `.vtq` v2 (`MAGIC = b"VTQ\0"`, `VERSION = 2`), 64-byte header + 64-byte-aligned single-stream `16×256` supertiles (`vtq_st16_*`, `816..3,184 B`) + UTF-8 JSON footer. One binary layout is shared identically across disk, CPU, and GPU.
+- **Trellis & rotation:** Zero-shuffle 256-step tail-biting Ungerboeck trellis (`ν = 10`, 1,024 states, `nl = 16` subsets) with `Block16-LDLQ` causal Cholesky compensation, CUDA radix-4 Viterbi encoding, and Outer-DCT / Kronecker-Hadamard input rotation (`16`-row granularity on `M`, eliminating EXL3's `+9%` padding overhead on non-power-of-two widths like `704`-dim MoE layers).
+- **Global bit allocation:** Inverse-CDF Row-Fisher sensitivities drive a global DP knapsack across 20 active `nl = 16` formats (`1.5..6.0 bpw`) plus `VTQ` row-ring quantization for `embed_tokens` and `lm_head`.
+- **Relation to LTQ / `.liqk`:** **VTQ (`.vtq` v2)** supersedes earlier `LTQ` and `.liqk` research prototypes preserved in `src/` for historical reference.
+- **License:** GNU General Public License v3.0 (`GPL-3.0`).
+- **Author / Organization:** Vemloir / [velri-inference](https://github.com/velri-inference).
+
+## End-to-End Verified Benchmarks (`VTQ` vs `EXL3` vs `GGUF`)
+
+All three formats (`VTQ` `.vtq` v2, `EXL3` `mul1`, `GGUF` `imatrix`) are calibrated on the exact same domain-neutral corpus (`wikitext-2-raw-v1` `train`, `64 × 2048 = 131,072` tokens) and evaluated end-to-end (including quantized `embed_tokens` and `lm_head`, measured by full serialized `total_bpw`) on three strictly disjoint traces (`nemotron` agentic/reasoning, `multilingual` 10-language, `wikitext2` test; `B = 2000` paired bootstrap):
+
+- **Win rate:** **36 / 36 cells** strictly lower teacher-forced KLD than both `EXL3` and `GGUF` across 3 models × 4 bitrates (`2.5, 3.5, 4.5, 6.0` bpw) × 3 traces.
+- **`Llama-3.1-8B-Instruct` (Dense 8B):** `−15%..−22%` lower KLD than `EXL3`; `2.5 bpw` KLD (`nem`/`mul`/`wt2`) = `0.13003 / 0.19752 / 0.14959` vs `EXL3` `0.15281 / 0.24938 / 0.16235` vs `GGUF:IQ2_S` (`2.75 bpw`) `0.24075 / 0.39132 / 0.37948`; full 4-bitrate suite quantizes in `13.8 min` vs `29.2 min` for `EXL3` (`2.1×` faster).
+- **`gemma-4-26B-A4B-it` (128-Expert MoE, non-power-of-two `I_moe = 704`):** **`−47%..−58%` (over `2×` lower KLD)** than `EXL3` at `2.5–4.5 bpw`; `2.5 bpw` KLD = `0.07784 / 0.13225 / 0.14941` vs `EXL3` `0.17516 / 0.26133 / 0.29695` vs `GGUF:IQ2_S` (`3.13 bpw`) `0.25522 / 0.30800 / 0.52578`; full 4-bitrate suite `46.8 min` vs `101.1 min` (`2.2×` faster; up to `4.2×` faster at `2.5 bpw`).
+- **`Qwen3.6-35B-A3B` (256-Expert Hybrid Gated DeltaNet MoE):** `−16%..−33%` lower KLD than `EXL3`; `2.5 bpw` KLD = `0.05973 / 0.06958 / 0.07527` vs `EXL3` `0.08347 / 0.09263 / 0.09507` vs `GGUF:IQ2_S` `0.17408 / 0.18170 / 0.27023`; full 4-bitrate suite `70.0 min` vs `196.1 min` (`2.8×` faster; up to `5.1×` faster at `2.5 bpw`).
+- **GPU decode bandwidth:** Up to **`1,476.9 GB/s` (`96.4%` of peak HBM bandwidth)** on `NVIDIA RTX PRO 6000 Blackwell` (`sm_120`).
+- **CPU AVX2 design:** Single `_mm256_srli_epi16` state advance + `vpshufb`-only codebooks (`at2_16_16` / `at2z_32_32` without `vpblendvb`), compiled with `-mno-avx512f`.
+
+## Core Documentation & Code
+
+- [Repository Overview (README)](https://github.com/velri-inference/vtq-research/blob/main/README.md): Architecture summary, Pareto charts, research evolution, and reproduction entry points.
+- [VTQ v2 Specification & Kernels (EN)](https://github.com/velri-inference/vtq-research/blob/main/docs/EN/vtq-format.md): Complete `16×256` supertile layout, trellis math, codebooks, and container specification.
+- [End-to-End Paper Benchmarks (EN)](https://github.com/velri-inference/vtq-research/blob/main/docs/EN/paper-benchmarks.md): Full KLD, perplexity, bitrate, and quantization time tables for `Llama-3.1-8B`, `gemma-4-26B-A4B`, and `Qwen3.6-35B-A3B`.
+- [Native C++17 Tile I/O (EN)](https://github.com/velri-inference/vtq-research/blob/main/docs/EN/vtq-native-io.md): Optional C++17 packer/unpacker (`6.2–8.3×` faster materialization than NumPy).
+- [Turnkey Reproduction Branch (`paper-repro`)](https://github.com/velri-inference/vtq-research/tree/paper-repro): Tracked held-out evaluation traces, SHA-256 checksums, and end-to-end scripts.
+
+## Velri Ecosystem
+
+- [Velri Engine](https://github.com/velri-inference/velri): Native C23/C++23 + Khronos Slang AOT LLM inference engine (CPU & Vulkan 1.3).
+- [Velri-lib](https://github.com/velri-inference/velri-lib): Standalone C23 tensor, graph, and Slang AOT kernel computation library.
+- [Velri Hub](https://velri-inference.github.io/): Unified website and full ecosystem LLM brief ([llms-full.txt](https://velri-inference.github.io/llms-full.txt)).
+
+## Optional (Russian Documentation)
+
+- [Спецификация VTQ v2 (RU)](https://github.com/velri-inference/vtq-research/blob/main/docs/RU/vtq-format.md)
+- [Полные таблицы бенчмарков (RU)](https://github.com/velri-inference/vtq-research/blob/main/docs/RU/paper-benchmarks.md)
+- [Нативный C++17 I/O (RU)](https://github.com/velri-inference/vtq-research/blob/main/docs/RU/vtq-native-io.md)

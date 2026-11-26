@@ -1,6 +1,8 @@
 # VTQ — Velri Trellis Quant
 
-**VTQ** (*Velri Trellis Quant*, `.vtq`) is a hardware-co-designed trellis weight quantization format built around self-contained **`16×256` (`4,096`-weight) supertiles** (`1.5–6.0 bpw`), targeting both **AVX2 CPUs** (`vpshufb`, compiled without AVX-512) and **GPUs** (`FP32` and `DP4A INT8` GEMV/GEMM) with a lower operation count per 256 weights than EXL3, 1.3–5.1× faster model quantization than EXL3 conversion, and strictly lower teacher-forced KL divergence than both EXL3 (`mul1`) and GGUF (`imatrix`) across dense, non-power-of-two MoE, and hybrid linear-attention MoE architectures.
+**[Website](https://velri-inference.github.io/)** · **[Format Spec (EN)](docs/EN/vtq-format.md) / [RU](docs/RU/vtq-format.md)** · **[Benchmarks (EN)](docs/EN/paper-benchmarks.md) / [RU](docs/RU/paper-benchmarks.md)** · **[Velri Engine](https://github.com/velri-inference/velri)** · **[Velri-lib](https://github.com/velri-inference/velri-lib)** · **[llms.txt](llms.txt)** · **License: [GPL-3.0](LICENSE)**
+
+**VTQ** (*Velri Trellis Quant*, `.vtq`) is a hardware-co-designed trellis weight quantization format for Large Language Models (LLMs), built for the [Velri](https://github.com/velri-inference/velri) inference engine around self-contained **`16×256` (`4,096`-weight) supertiles** (`1.5–6.0 bpw`), targeting both **AVX2 CPUs** (`vpshufb`, compiled without AVX-512) and **GPUs** (`FP32` and `DP4A INT8` GEMV/GEMM) with a lower operation count per 256 weights than EXL3, 1.3–5.1× faster model quantization than EXL3 conversion, and strictly lower teacher-forced KL divergence than both EXL3 (`mul1`) and GGUF (`imatrix`) across dense, non-power-of-two MoE, and hybrid linear-attention MoE architectures.
 
 - **Specification & Kernels**: [EN (`docs/EN/vtq-format.md`)](docs/EN/vtq-format.md) | [RU (`docs/RU/vtq-format.md`)](docs/RU/vtq-format.md) — quantizer [`src/vtq.py`](src/vtq.py), `.vtq` v2 container [`src/vtq_format.py`](src/vtq_format.py), AVX2 kernel [`src/cpu/vtq_avx2_bench.c`](src/cpu/vtq_avx2_bench.c), CUDA `sm_120` kernel [`src/cuda/vtq_matvec_bench.cu`](src/cuda/vtq_matvec_bench.cu), optional C++ tile packer/unpacker [EN](docs/EN/vtq-native-io.md) / [RU](docs/RU/vtq-native-io.md).
 - **End-to-End Benchmarks & Reproduction**: [EN (`docs/EN/paper-benchmarks.md`)](docs/EN/paper-benchmarks.md) | [RU (`docs/RU/paper-benchmarks.md`)](docs/RU/paper-benchmarks.md) — runner [`src/run_paper_benchmarks.py`](src/run_paper_benchmarks.py), figure generator [`src/plot_paper_benchmarks.py`](src/plot_paper_benchmarks.py), raw JSONs in [`results/`](results/).
@@ -17,6 +19,19 @@
 All three formats (`VTQ` `.vtq` v2, `EXL3` `mul1`, and `GGUF` `imatrix`) are quantized from the same BF16 checkpoint on the **exact same domain-neutral calibration corpus** (`wikitext-2-raw-v1` `train`, `64 × 2048 = 131,072` tokens) and evaluated end-to-end (including quantized `embed_tokens` and `lm_head`, measured by full serialized text-model `total_bpw = total_text_bytes * 8 / total_text_params`) on three strictly disjoint held-out traces (`WikiText-2` `test`, `Nemotron` agentic/reasoning dialogues, and `10`-language `Multilingual`, paired bootstrap `B = 2000`).
 
 Across all **3 models × 4 target bitrates (`2.5, 3.5, 4.5, 6.0` bpw) × 3 traces (`36 / 36` cells)**, `VTQ` achieves strictly lower teacher-forced KLD than both `EXL3` and `GGUF` (`−15%..−22%` vs `EXL3` on dense `Llama-3.1-8B`, **`−47%..−58%` — over `2×` lower KLD — on `gemma-4-26B-A4B-it`** at `2.5–4.5 bpw`, and `−16%..−33%` on `Qwen3.6-35B-A3B`), while quantizing **1.3–5.1× faster** than `EXL3` ([quantization time chart](docs/figures/paper_quant_time.svg), [full tables EN](docs/EN/paper-benchmarks.md) / [RU](docs/RU/paper-benchmarks.md)).
+
+### Headline Summary Table (Domain-Neutral Calibration, `nem` / `mul` / `wt2` KLD)
+
+| Model | Target | `VTQ` (`total_bpw`, KLD `nem`/`mul`/`wt2`) | `EXL3` (`total_bpw`, KLD `nem`/`mul`/`wt2`) | `GGUF` (`total_bpw`, KLD `nem`/`mul`/`wt2`) | Quant Speedup (`VTQ` vs `EXL3`) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`Llama-3.1-8B-Instruct`** *(Dense 8B)* | `2.5 bpw` | `2.51` — **`0.130 / 0.198 / 0.150`** | `2.49` — `0.153 / 0.249 / 0.162` | `2.75` (`IQ2_S`) — `0.241 / 0.391 / 0.379` | **`3.3×`** (`158.5 s` vs `527.5 s`) |
+| **`Llama-3.1-8B-Instruct`** | `3.5 bpw` | `3.51` — **`0.027 / 0.040 / 0.032`** | `3.49` — `0.035 / 0.052 / 0.038` | `3.77` (`IQ3_M`) — `0.054 / 0.071 / 0.086` | **`2.6×`** (`199.3 s` vs `526.5 s`) |
+| **`gemma-4-26B-A4B-it`** *(128-Exp MoE, `I=704`)* | `2.5 bpw` | `2.51` — **`0.078 / 0.132 / 0.149`** | `2.50` — `0.175 / 0.261 / 0.297` | `3.13` (`IQ2_S`) — `0.255 / 0.308 / 0.526` | **`4.2×`** (`431.8 s` vs `1811.4 s`) |
+| **`gemma-4-26B-A4B-it`** | `3.5 bpw` | `3.51` — **`0.020 / 0.034 / 0.047`** | `3.49` — `0.044 / 0.063 / 0.096` | `3.93` (`IQ3_M`) — `0.058 / 0.074 / 0.155` | **`3.0×`** (`483.1 s` vs `1437.4 s`) |
+| **`Qwen3.6-35B-A3B`** *(256-Exp Hybrid MoE)* | `2.5 bpw` | `2.50` — **`0.060 / 0.070 / 0.075`** | `2.52` — `0.083 / 0.093 / 0.095` | `2.46` (`IQ2_S`) — `0.174 / 0.182 / 0.270` | **`5.1×`** (`791.2 s` vs `4014.0 s`) |
+| **`Qwen3.6-35B-A3B`** | `3.5 bpw` | `3.50` — **`0.017 / 0.021 / 0.025`** | `3.51` — `0.026 / 0.029 / 0.033` | `3.56` (`IQ3_M`) — `0.045 / 0.046 / 0.077` | **`4.3×`** (`904.0 s` vs `3905.6 s`) |
+
+*Full 4-bitrate tables (`2.5 / 3.5 / 4.5 / 6.0 bpw`), $\Delta\text{PPL}$, and 4-bitrate suite timings (`2.1×–2.8×` faster end-to-end vs `EXL3` on `RTX PRO 6000 Blackwell`) are in [docs/EN/paper-benchmarks.md](docs/EN/paper-benchmarks.md) ([RU](docs/RU/paper-benchmarks.md)).*
 
 ![Llama-3.1-8B-Instruct KLD vs Total BPW](docs/figures/llama31_8b_kld.svg)
 
@@ -63,4 +78,34 @@ Constraints held constant from the start: fast decoding on both GPU and AVX2 CPU
 ```bash
 python -m src.vtq_format              # .vtq v2 container & 16x256 supertile round-trip self-test
 python -m src.plot_paper_benchmarks   # regenerate all SVG/PNG figures in docs/figures/ from results/paper_*.json
+```
+
+## Velri Ecosystem
+
+| Repository | Role |
+| :--- | :--- |
+| **[velri-inference/velri](https://github.com/velri-inference/velri)** | Native C23/C++23 + Khronos Slang AOT LLM inference engine (CPU & Vulkan 1.3) |
+| **[velri-inference/velri-lib](https://github.com/velri-inference/velri-lib)** | Standalone C23 tensor, execution graph, and Slang AOT kernel library (`VelriLib::velri`) |
+| **[velri-inference/vtq-research](https://github.com/velri-inference/vtq-research)** *(this repo)* | **VTQ** (*Velri Trellis Quant*, `.vtq` v2) format specification, quantizer, kernels, and benchmarks |
+| **[velri-inference.github.io](https://velri-inference.github.io/)** | Unified ecosystem website and full LLM reference ([`llms-full.txt`](https://velri-inference.github.io/llms-full.txt)) |
+
+## FAQ
+
+- **How does VTQ differ from EXL3 and GGUF?** Unlike GGUF block quantizers, VTQ uses a 256-step tail-biting Ungerboeck trellis (`1,024` states, `nl = 16` subsets) with global Row-Fisher DP bit allocation across `1.5–6.0 bpw`. Compared to EXL3, VTQ uses a single-stream `16×256` supertile with `16`-row Outer-DCT/Kronecker-Hadamard granularity (avoiding `+9%` padding overhead on non-power-of-two MoE dimensions such as `704`), runs zero-shuffle lookup decoding on both GPU and AVX2 CPU, quantizes `1.3–5.1×` faster, and achieves strictly lower KLD across `36/36` neutral-calibration cells.
+- **Does VTQ require AVX-512 on CPU?** No. VTQ CPU codebooks (`s8_32`, `u8`, `at2_16_16`, `at2z_32_32`) are co-designed specifically for **AVX2 `vpshufb`** (`-mno-avx512f`) without `vpblendvb` or runtime Galois popcounts.
+- **What happened to LTQ and `.liqk`?** `LTQ` and `.liqk` were earlier research milestones documented in steps 1–9 above and preserved in `src/` for reproducibility. **VTQ (`.vtq` v2)** is the current, actively developed format for Velri.
+
+## License & Citation
+
+Licensed under the **[GNU General Public License v3.0](LICENSE)**. Machine-readable citation metadata lives in [`CITATION.cff`](CITATION.cff):
+
+```bibtex
+@software{vemloir2026vtq,
+  author  = {Vemloir},
+  title   = {{VTQ}: Velri Trellis Quant --- Hardware-Co-Designed 16x256 Trellis Weight Quantization for {LLMs}},
+  year    = {2026},
+  version = {2.0.0},
+  license = {GPL-3.0},
+  url     = {https://github.com/velri-inference/vtq-research}
+}
 ```
