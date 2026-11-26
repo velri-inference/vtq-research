@@ -20,6 +20,7 @@ matrices with `sigma_reg = 0.10`):
 
 from __future__ import annotations
 
+import fnmatch
 import gc
 import os
 import time
@@ -35,7 +36,13 @@ from src.tcq_proto import viterbi_ub_cuda
 from src.vtq_format import SUPER_ROWS, TILE, U_SB_UNIT
 
 DEFAULT_GPTQ2D_SIGMA_REG = 0.10
-DEFAULT_GPTQ2D_TARGETS: Tuple[str, ...] = ("self_attn.o_proj", "mlp.down_proj")
+DEFAULT_GPTQ2D_TARGETS: Tuple[str, ...] = (
+    "self_attn.o_proj",
+    "linear_attn.out_proj",
+    "mlp.down_proj",
+    "mlp.shared_expert.down_proj",
+    "experts.*.down_proj",
+)
 
 # Mapping from canonical submodule suffixes to YAQA / RelaxML short Hessian names
 _SUBNAME_TO_YAQA_SHORT = {
@@ -43,7 +50,7 @@ _SUBNAME_TO_YAQA_SHORT = {
     "k_proj": "k",
     "v_proj": "v",
     "o_proj": "o",
-    "out_proj": "o",
+    "out_proj": "out",
     "gate_proj": "gate",
     "up_proj": "up",
     "down_proj": "down",
@@ -151,6 +158,42 @@ def ldl_of_inverse_block(
     return L.float().contiguous(), prec_diag.float().contiguous(), scalar_dw.float().contiguous()
 
 
+@torch.no_grad()
+def ldl_of_inverse_block_batched(
+    M: torch.Tensor,
+    size: int = SUPER_ROWS,
+    use_fp64: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Batched version of `ldl_of_inverse_block` for `M [B, n, n]`.
+    Returns `(L [B, n, n], prec_diag [B, n], scalar_dw [B, n])` in float32.
+    """
+    work_dt = torch.float64 if use_fp64 else torch.float32
+    Mw = M.to(work_dt)
+    B, n, _ = Mw.shape
+    assert n % size == 0, f"Matrix dimension {n} must be a multiple of super-entry size {size}"
+    k = n // size
+    Um = torch.linalg.cholesky(Mw.flip(dims=(-2, -1))).flip(dims=(-2, -1))
+    del Mw
+    scalar_dw = (Um.diagonal(dim1=-2, dim2=-1) ** 2).clamp(min=1e-12)
+    eye = torch.eye(n, dtype=work_dt, device=M.device).expand(B, n, n)
+    L_raw = torch.linalg.solve_triangular(Um, eye, upper=True).transpose(-2, -1).contiguous()
+    del eye
+    Um_bb = Um.reshape(B, k, size, k, size).diagonal(dim1=1, dim2=3).permute(0, 3, 1, 2).contiguous()
+    del Um
+    prec_diag = (Um_bb * Um_bb).sum(dim=-1).reshape(B, n)
+    L = torch.bmm(
+        L_raw.reshape(B, n, k, size).transpose(1, 2).reshape(B * k, n, size),
+        Um_bb.transpose(-2, -1).reshape(B * k, size, size),
+    ).reshape(B, k, n, size).transpose(1, 2).reshape(B, n, n).contiguous()
+    del L_raw, Um_bb
+    L.tril_()
+    L_blk = L.view(B, k, size, k, size)
+    idx = torch.arange(k, device=M.device)
+    L_blk[:, idx, :, idx, :] = torch.eye(size, dtype=work_dt, device=M.device)
+    return L.float().contiguous(), prec_diag.float().contiguous(), scalar_dw.float().contiguous()
+
+
 # =================================================================================================
 # 2. Output Hessian Loader / Provider (Local Dir, HF Repo, or Dict) & Sketch-B Builder
 # =================================================================================================
@@ -172,22 +215,31 @@ def load_output_hessian_file(path: Union[str, Path], n: int, device: torch.devic
 
 def _match_target(full_name: str, targets: Sequence[str]) -> bool:
     for t in targets:
-        if full_name == t or full_name.endswith("." + t) or full_name.endswith(t):
+        if "*" in t:
+            if fnmatch.fnmatch(full_name, t) or fnmatch.fnmatch(full_name, "*." + t):
+                return True
+        elif full_name == t or full_name.endswith("." + t) or full_name.endswith(t):
             return True
     return False
 
 
 def _short_yaqa_name(full_name: str) -> Optional[str]:
+    if "experts." in full_name and full_name.endswith(".down_proj"):
+        return "moe_down"
+    if "shared_expert" in full_name and full_name.endswith(".down_proj"):
+        return "shared_down"
     tail = full_name.rsplit(".", 1)[-1]
     return _SUBNAME_TO_YAQA_SHORT.get(tail)
 
 
 class OutHessianProvider:
     """
-    Resolves `(layer_idx, subname)` -> raw symmetric output Hessian `G_out [M, M]` for VTQ GPTQ-2D.
+    Resolves `(layer_idx, subname)` -> raw symmetric output Hessian `G_out [M, M]` or
+    cached `(L_G, row_prec)` block-16 LDL factors for VTQ GPTQ-2D.
 
     `source` may be:
-      - `Path` or local directory string containing `{l}_{short}_hout.pt` or `{l}_{subname}_hout.pt`,
+      - `Path` or local directory string containing `{l}_{short}_hout.pt` or `{l}_{subname}_hout.pt`
+        (including layer-shared `{l}_moe_down_hout.pt` for MoE `experts.*.down_proj`),
       - HuggingFace Hub repo id string (e.g. `"relaxml/Llama-3.1-8B-Instruct-Hessians-2Sided"`),
       - In-memory mapping `Dict[Tuple[int, str], torch.Tensor]`.
     """
@@ -206,6 +258,8 @@ class OutHessianProvider:
         self._dict: Optional[Dict[Tuple[int, str], torch.Tensor]] = None
         self._local_dir: Optional[Path] = None
         self._hf_repo: Optional[str] = None
+        self._factor_cache_layer: int = -1
+        self._factor_cache: Dict[Tuple[str, int, str], Tuple[torch.Tensor, torch.Tensor]] = {}
 
         if isinstance(source, dict):
             self._dict = source
@@ -219,30 +273,39 @@ class OutHessianProvider:
     def wants(self, full_name: str) -> bool:
         return _match_target(full_name, self.targets)
 
-    def get(self, layer_idx: int, full_name: str, M: int, device: torch.device) -> Optional[torch.Tensor]:
+    def _candidate_names(self, layer_idx: int, full_name: str) -> List[str]:
+        short = _short_yaqa_name(full_name)
+        cand = [f"{layer_idx}_{full_name}_hout.pt"]
+        if short is not None:
+            cand.append(f"{layer_idx}_{short}_hout.pt")
+        if full_name.endswith("out_proj") and f"{layer_idx}_o_hout.pt" not in cand:
+            cand.append(f"{layer_idx}_o_hout.pt")
+        return cand
+
+    def _resolve_raw(
+        self, layer_idx: int, full_name: str, M: int, device: torch.device
+    ) -> Tuple[Optional[str], Optional[torch.Tensor]]:
         if not self.wants(full_name):
-            return None
+            return None, None
         if self._dict is not None:
+            key_used = full_name
             t = self._dict.get((layer_idx, full_name))
             if t is None:
                 short = _short_yaqa_name(full_name)
                 if short is not None:
+                    key_used = short
                     t = self._dict.get((layer_idx, short))
             if t is None:
-                return None
-            return flat_to_sym(t.to(device=device, dtype=torch.float64), M)
+                return None, None
+            return key_used, flat_to_sym(t.to(device=device, dtype=torch.float64), M)
 
-        short = _short_yaqa_name(full_name)
-        cand_names = [f"{layer_idx}_{full_name}_hout.pt"]
-        if short is not None:
-            cand_names.append(f"{layer_idx}_{short}_hout.pt")
-
+        cand_names = self._candidate_names(layer_idx, full_name)
         if self._local_dir is not None:
             for fn in cand_names:
                 fp = self._local_dir / fn
                 if fp.exists():
-                    return load_output_hessian_file(fp, M, device)
-            return None
+                    return fn, load_output_hessian_file(fp, M, device)
+            return None, None
 
         if self._hf_repo is not None:
             from huggingface_hub import hf_hub_download
@@ -251,10 +314,58 @@ class OutHessianProvider:
             for fn in reversed(cand_names):  # YAQA `{l}_{short}_hout.pt` first on HF
                 try:
                     fp = hf_hub_download(repo_id=self._hf_repo, filename=fn, **kw)
-                    return load_output_hessian_file(fp, M, device)
+                    return fn, load_output_hessian_file(fp, M, device)
                 except Exception:
                     continue
-        return None
+        return None, None
+
+    def get(self, layer_idx: int, full_name: str, M: int, device: torch.device) -> Optional[torch.Tensor]:
+        _, G = self._resolve_raw(layer_idx, full_name, M, device)
+        return G
+
+    @torch.no_grad()
+    def get_factors(
+        self, layer_idx: int, full_name: str, M_orig: int, device: torch.device
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Returns cached `(L_G, row_prec)` on `device` (padded to `M_pad = ceil(M_orig/16)*16`),
+        caching per-layer so all 128-256 MoE experts sharing `{l}_moe_down_hout.pt` factor `G` ONCE!
+        """
+        if not self.wants(full_name):
+            return None
+        M_pad = ((M_orig + SUPER_ROWS - 1) // SUPER_ROWS) * SUPER_ROWS
+        if layer_idx != self._factor_cache_layer:
+            self._factor_cache.clear()
+            self._factor_cache_layer = layer_idx
+
+        # Fast path: check canonical key before touching disk
+        short = _short_yaqa_name(full_name)
+        dev_key = str(device)
+        if self._local_dir is not None:
+            for fn in self._candidate_names(layer_idx, full_name):
+                ck = (fn, M_pad, dev_key)
+                if ck in self._factor_cache:
+                    return self._factor_cache[ck]
+        elif self._dict is not None:
+            for nm in (full_name, short):
+                if nm is not None and (nm, M_pad, dev_key) in self._factor_cache:
+                    return self._factor_cache[(nm, M_pad, dev_key)]
+
+        resolved_key, G_raw = self._resolve_raw(layer_idx, full_name, M_orig, device)
+        if G_raw is None or resolved_key is None:
+            return None
+        ck = (resolved_key, M_pad, dev_key)
+        if ck not in self._factor_cache:
+            G_pad = pad_output_hessian(G_raw, M_pad)
+            del G_raw
+            G_reg, _ = regularize_output_hessian(G_pad, sigma_reg=self.sigma_reg)
+            del G_pad
+            L_G, row_prec, _ = ldl_of_inverse_block(G_reg, size=SUPER_ROWS, use_fp64=True)
+            del G_reg
+            self._factor_cache[ck] = (L_G, row_prec)
+        else:
+            del G_raw
+        return self._factor_cache[ck]
 
 
 @torch.no_grad()
@@ -465,7 +576,7 @@ def _build_stage_spec_runs(
 def quantize_rows_vtq_gptq2d(
     W_rot: torch.Tensor,                      # float32 [M, Kin] rotated weights (`M % 16 == 0, Kin % 256 == 0`)
     H_reg: torch.Tensor,                      # float32 [Kin, Kin] regularized rotated input Hessian
-    G_out: torch.Tensor,                      # [M, M] output Hessian (raw or regularized)
+    G_out: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],  # [M, M] output Hessian OR pre-factored `(L_G, row_prec)`
     row_slices: List[Tuple[int, int, str]],   # [(r0, r1, spec_name), ...] covering [0, M)
     *,
     vtq_mod,                                  # `src.vtq` module (avoids circular import)
@@ -485,9 +596,15 @@ def quantize_rows_vtq_gptq2d(
     nblocks = Kin // TILE
 
     # 1) Regularize output Hessian G (float64) and compute block-16 feedback factors L_G, U_H
-    G_reg, _ = regularize_output_hessian(G_out, sigma_reg=sigma_reg)
-    L_G, row_prec, _ = ldl_of_inverse_block(G_reg, size=SUPER_ROWS, use_fp64=True)
-    del G_reg
+    if isinstance(G_out, tuple):
+        L_G, row_prec = G_out
+        assert L_G.shape == (M, M), f"Pre-factored L_G shape mismatch: {tuple(L_G.shape)} vs {(M, M)}"
+        owns_lg = False
+    else:
+        G_reg, _ = regularize_output_hessian(G_out, sigma_reg=sigma_reg)
+        L_G, row_prec, _ = ldl_of_inverse_block(G_reg, size=SUPER_ROWS, use_fp64=True)
+        del G_reg
+        owns_lg = True
     L_H, col_prec, dw_col = ldl_of_inverse_block(H_reg, size=16, use_fp64=False)
     U_16 = L_H.T.contiguous()
     del L_H
@@ -630,7 +747,9 @@ def quantize_rows_vtq_gptq2d(
             quantizer_inputs=(d_eff_full.reshape(-1), wts_2d.reshape(-1)),
         )
     assert stage_ctr[0] == len(stage_runs), f"Incomplete sweep: {stage_ctr[0]} vs {len(stage_runs)}"
-    del L_G, U_16, wts_2d, d_eff_full
+    if owns_lg:
+        del L_G
+    del U_16, wts_2d, d_eff_full
 
     # 5) Pack `(g_sub, c_all, u_all)` bit-exactly per slice when `emit_pack=True`
     g_sub_all = c_all = u_all = None
@@ -647,6 +766,157 @@ def quantize_rows_vtq_gptq2d(
             g_sub_all[r0:r1] = gs.view(R_sl, nblocks, 16)
             c_all[r0:r1] = ca.view(R_sl, nblocks, 16, 2)
             u_all[r0:r1] = ua.view(R_sl, nblocks, TILE)
+        del gi_full, idx_full
+
+    return {
+        "G_nat": g_nat_full,
+        "d_row": d_row_all,
+        "u_sb": u_sb_all,
+        "g_sub": g_sub_all,
+        "c_all": c_all,
+        "u_all": u_all,
+    }
+
+
+@torch.no_grad()
+def quantize_rows_vtq_gptq2d_batched(
+    W_rot: torch.Tensor,                                   # float32 [B, M, Kin]
+    H_reg: torch.Tensor,                                   # float32 [B, Kin, Kin] already regularized
+    G_factors: Tuple[torch.Tensor, torch.Tensor],          # shared `(L_G [M, M], row_prec [M])`
+    spec_name: str,
+    *,
+    vtq_mod,
+    weight_mode: str = "dw",
+    emit_pack: bool = False,
+    use_triton: Optional[bool] = None,
+) -> Dict[str, Optional[torch.Tensor]]:
+    """
+    Batched uniform-spec `16x16` super-entry GPTQ-2D for `B` MoE experts sharing one layer-level
+    `(L_G [M, M], row_prec [M])` with per-expert input Hessians `H_reg [B, Kin, Kin]`.
+    Mathematically identical to calling `quantize_rows_vtq_gptq2d` on each expert independently,
+    while saturating GPU SMs (~10-20x faster on 128-256 expert MoEs).
+    """
+    dev = W_rot.device
+    B, M, Kin = W_rot.shape
+    assert M % SUPER_ROWS == 0 and Kin % TILE == 0, f"Expected (M%16==0, K%256==0), got {(M, Kin)}"
+    L_G, row_prec = G_factors
+    assert L_G.shape == (M, M), f"Shared L_G shape mismatch: {tuple(L_G.shape)} vs {(M, M)}"
+    nblocks = Kin // TILE
+
+    L_H, col_prec, dw_col = ldl_of_inverse_block_batched(H_reg, size=16, use_fp64=False)
+    U_16 = L_H.transpose(-2, -1).contiguous()
+    del L_H
+
+    cfg = vtq_mod.VTQ_CONFIG[spec_name]
+    cfg_scale = float(cfg.get("scale", 1.0))
+    rms_rb = vtq_mod._initial_tile_scales(W_rot.reshape(B * M, Kin), cfg_scale, spec_name)
+    d_r_fp16 = (rms_rb.max(dim=1).values * (128.0 / 224.0)).clamp(min=1e-7).to(torch.float16)
+    step_r = (d_r_fp16.float().clamp(min=1e-8) * float(U_SB_UNIT)).clamp(min=1e-12)
+    u_f = torch.round(rms_rb / step_r.unsqueeze(1)).clamp(1.0, 255.0)
+    d_row_all = d_r_fp16.view(B, M).contiguous()
+    u_sb_all = u_f.to(torch.uint8).view(B, M, nblocks).contiguous()
+    d_eff_static = (d_r_fp16.float().unsqueeze(1) * (u_f * float(U_SB_UNIT))).clamp(min=1e-10).view(B, M, nblocks)
+    d_eff_full = d_eff_static.repeat_interleave(TILE, dim=2).contiguous()
+
+    if weight_mode == "schur":
+        rp = row_prec / row_prec.mean().clamp(min=1e-12)
+        cp = col_prec / col_prec.mean(dim=1, keepdim=True).clamp(min=1e-12)
+        wts_2d = (rp.view(1, M, 1) * (d_eff_full * d_eff_full) * cp.view(B, 1, Kin)).clamp(min=1e-12)
+        wts_2d = wts_2d / wts_2d.mean(dim=(1, 2), keepdim=True).clamp(min=1e-12)
+    elif weight_mode == "dw":
+        wts_2d = dw_col.unsqueeze(1).expand(B, M, Kin).contiguous()
+    else:
+        raise ValueError(f"Unknown gptq2d weight_mode: {weight_mode!r}")
+
+    tb_win = int(os.environ.get("TCQ_TB_WIN", "32"))
+    cfg_g, tab, gains = vtq_mod._get_spec_gpu_vtq(spec_name, dev)
+    K_sp = int(cfg_g["K"])
+    nl = int(cfg_g["nl"])
+    frac = int(cfg_g["frac"])
+    pp = vtq_mod._FRAC_TO_TCQ_PP[frac]
+    m_extra = vtq_mod._NL_TO_M_EXTRA[nl]
+    n_cand = 4 if int(gains.numel()) > 4 else 0
+    max_nt = 2048 if pp > 0 else 16384
+
+    g_nat_full = torch.empty((B, M, Kin), dtype=torch.float32, device=dev)
+    g_nat_flat = g_nat_full.reshape(B, M * Kin)
+    gi_full = torch.empty((B, M, Kin), dtype=torch.uint8, device=dev) if emit_pack else None
+    idx_full = torch.empty((B, M, Kin), dtype=torch.int32, device=dev) if emit_pack else None
+    gi_flat = gi_full.reshape(B, M * Kin) if emit_pack else None
+    idx_flat = idx_full.reshape(B, M * Kin) if emit_pack else None
+
+    def _run_viterbi(x_t: torch.Tensor, w_t: torch.Tensor):
+        nt = x_t.shape[0]
+        if nt <= max_nt:
+            return viterbi_ub_cuda(
+                x_t, tab, K_sp, 10, 359, gains, sub=16, wts=w_t,
+                n_cand=n_cand, return_code=emit_pack, tail_biting=True, tb_window=tb_win,
+                m_extra=m_extra, pair_parity=pp,
+            )
+        rec_o = torch.empty_like(x_t)
+        gi_o = torch.empty((nt, 256), dtype=torch.int32, device=dev) if emit_pack else None
+        ix_o = torch.empty((nt, 256), dtype=torch.int32, device=dev) if emit_pack else None
+        for t0 in range(0, nt, max_nt):
+            t1 = min(nt, t0 + max_nt)
+            r = viterbi_ub_cuda(
+                x_t[t0:t1], tab, K_sp, 10, 359, gains, sub=16, wts=w_t[t0:t1],
+                n_cand=n_cand, return_code=emit_pack, tail_biting=True, tb_window=tb_win,
+                m_extra=m_extra, pair_parity=pp,
+            )
+            if emit_pack:
+                rec_o[t0:t1], gi_o[t0:t1], ix_o[t0:t1] = r
+            else:
+                rec_o[t0:t1] = r
+        return (rec_o, gi_o, ix_o) if emit_pack else rec_o
+
+    def vtq_super16_q_batched(
+        y_flat: torch.Tensor, select, scale_flat: torch.Tensor, wts_flat: torch.Tensor, *, out: torch.Tensor
+    ):
+        y_sub = select(y_flat)       # [B, d, 16, 16]
+        sc_sub = select(scale_flat)  # [B, d, 16, 16]
+        wt_sub = select(wts_flat)    # [B, d, 16, 16]
+        d = y_sub.shape[1]
+        x_tiles = (y_sub / sc_sub).reshape(B * d, 256).contiguous()
+        w_tiles = wt_sub.reshape(B * d, 256).contiguous()
+        res = _run_viterbi(x_tiles, w_tiles)
+        if emit_pack:
+            rec_t, gi_t, ix_t = res
+            select(gi_flat).copy_(gi_t.to(torch.uint8).view(B, d, 16, 16))
+            select(idx_flat).copy_(ix_t.view(B, d, 16, 16))
+        else:
+            rec_t = res
+        rec_view = rec_t.view(B, d, 16, 16)
+        select(g_nat_flat).copy_(rec_view)
+        torch.mul(rec_view, sc_sub, out=out)
+
+    do_triton = (g2d.HAS_TRITON and dev.type == "cuda") if use_triton is None else bool(use_triton)
+    if do_triton:
+        g2d.gptq_2d_super_entry(
+            W_rot, L_G, U_16,
+            quantizer=vtq_super16_q_batched,
+            super_entry_shape=(SUPER_ROWS, 16),
+            inner_block_size=8,
+            outer_block_size=64,
+            quantizer_inputs=(d_eff_full.reshape(B, M * Kin), wts_2d.reshape(B, M * Kin)),
+        )
+    else:
+        g2d.gptq_2d_super_entry_torch(
+            W_rot, L_G, U_16,
+            quantizer=vtq_super16_q_batched,
+            super_entry_shape=(SUPER_ROWS, 16),
+            quantizer_inputs=(d_eff_full.reshape(B, M * Kin), wts_2d.reshape(B, M * Kin)),
+        )
+    del U_16, wts_2d, d_eff_full
+
+    g_sub_all = c_all = u_all = None
+    if emit_pack:
+        U_sp = 1 << (K_sp - 1)
+        gi_2d = gi_full.view(B * M * nblocks, TILE)
+        ix_2d = idx_full.view(B * M * nblocks, TILE)
+        gs, ca, ua, _ = vtq_mod._code_to_vtq_pack(gi_2d, ix_2d, U_sp, return_labels=False)
+        g_sub_all = gs.view(B, M, nblocks, 16)
+        c_all = ca.view(B, M, nblocks, 16, 2)
+        u_all = ua.view(B, M, nblocks, TILE)
         del gi_full, idx_full
 
     return {

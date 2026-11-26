@@ -1,0 +1,55 @@
+{
+  "model_dir": "/content/work/models/Qwen3.6-35B-A3B",
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "n_seqs": 512,
+  "seq_len": 512,
+  "batch_size": 4,
+  "chunk_seqs": 128,
+  "include_moe": true,
+  "wall_sec": 885.1,
+  "eff_rank_summary": {
+    "moe_down": {
+      "count": 40,
+      "mean_eff_rank": 539.4,
+      "min": 128.2,
+      "max": 866.4
+    },
+    "out": {
+      "count": 30,
+      "mean_eff_rank": 399.7,
+      "min": 82.1,
+      "max": 702.2
+    },
+    "shared_down": {
+      "count": 40,
+      "mean_eff_rank": 389.5,
+      "min": 85.6,
+      "max": 661.0
+    },
+    "o": {
+      "count": 10,
+      "mean_eff_rank": 299.3,
+      "min": 33.8,
+      "max": 579.1
+    }
+  },
+  "calibration": {
+    "n_seqs": 512,
+    "seq_len": 512,
+    "total_tokens": 262144,
+    "seed": 20261125,
+    "provenance": {
+      "HuggingFaceFW/fineweb-edu:sample-10BT": 256,
+      "HuggingFaceFW/fineweb-2:rus_Cyrl": 20,
+      "HuggingFaceFW/fineweb-2:cmn_Hani": 20,
+      "HuggingFaceFW/fineweb-2:deu_Latn": 20,
+      "HuggingFaceFW/fineweb-2:fra_Latn": 20,
+      "HuggingFaceFW/fineweb-2:spa_Latn": 20,
+      "HuggingFaceFW/fineweb-2:jpn_Jpan": 20,
+      "HuggingFaceFW/fineweb-2:kor_Hang": 20,
+      "HuggingFaceFW/fineweb-2:arb_Arab": 20,
+      "HuggingFaceFW/fineweb-edu:sample-10BT_code": 96
+    },
+    "build_sec": 162.02
+  }
+}

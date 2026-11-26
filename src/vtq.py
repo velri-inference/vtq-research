@@ -681,18 +681,18 @@ def quantize_matrix_vtq(
         import src.vtq_gptq2d as vtq_g2d
 
         H_rot.diagonal().add_(damp * dmean)
-        G_pad = vtq_g2d.pad_output_hessian(G_out.to(device=dev), M)
+        G_arg = G_out if isinstance(G_out, tuple) else vtq_g2d.pad_output_hessian(G_out.to(device=dev), M)
         g2d_out = vtq_g2d.quantize_rows_vtq_gptq2d(
             W_rot,
             H_rot,
-            G_pad,
+            G_arg,
             row_slices,
             vtq_mod=sys.modules[__name__],
             sigma_reg=gptq2d_sigma_reg,
             weight_mode=gptq2d_weight_mode,
             emit_pack=emit_pack,
         )
-        del H_rot, G_pad, W_rot
+        del H_rot, G_arg, W_rot
         G_nat_all = g2d_out["G_nat"]
         d_row_all = g2d_out["d_row"]
         u_sb_all = g2d_out["u_sb"]
@@ -905,6 +905,100 @@ def quantize_matrix_vtq(
     else:
         W_hat_out = W_hat_eff
     return qdata, W_hat_out, rel_loss
+
+
+@torch.no_grad()
+def quantize_matrices_vtq_gptq2d_batch(
+    Ws: List[torch.Tensor],
+    Hs: List[torch.Tensor],
+    spec_name: str,
+    seeds: List[int],
+    G_factors: Tuple[torch.Tensor, torch.Tensor],
+    *,
+    damp: float = 0.30,
+    row_weights_list: Optional[List[Optional[torch.Tensor]]] = None,
+    rot_block: int = -1,
+    gptq2d_weight_mode: str = "dw",
+    emit_pack: bool = True,
+) -> List[Tuple[Optional[Dict[str, object]], torch.Tensor]]:
+    """
+    Batched uniform-spec VTQ GPTQ-2D quantizer for `B` same-shape matrices sharing one `(L_G, row_prec)`
+    (e.g. routed MoE `experts.*.down_proj` within a layer). Bit-exact equivalent to calling
+    `quantize_matrix_vtq(..., gptq2d=True)` on each matrix individually.
+    """
+    import src.vtq_gptq2d as vtq_g2d
+
+    if not VTQ_CONFIG:
+        load_and_register_vtq()
+    B = len(Ws)
+    assert B > 0 and len(Hs) == B and len(seeds) == B
+    dev = Ws[0].device
+
+    W_rots: List[torch.Tensor] = []
+    H_regs: List[torch.Tensor] = []
+    suhs_fp16: List[torch.Tensor] = []
+    orig_shape = None
+    for b in range(B):
+        rw_b = row_weights_list[b] if row_weights_list is not None else None
+        W_src, H_f32, rw_pad, osh = pad_wh_to_supertile(Ws[b].float(), Hs[b].float(), rw_b)
+        if orig_shape is None:
+            orig_shape = osh
+        W_rot, H_rot, suh = compute_suh_vtq(W_src, H_f32, seed=seeds[b], row_weights=rw_pad, rot_block=rot_block)
+        dmean = H_rot.diagonal().mean().clamp(min=1e-8)
+        H_rot.diagonal().add_(damp * dmean)
+        W_rots.append(W_rot)
+        H_regs.append(H_rot)
+        suhs_fp16.append(suh.to(torch.float16))
+
+    W_rot_b = torch.stack(W_rots, dim=0).contiguous()  # [B, M, Kin]
+    H_reg_b = torch.stack(H_regs, dim=0).contiguous()  # [B, Kin, Kin]
+    del W_rots, H_regs
+    _, M, Kin = W_rot_b.shape
+    nblocks = Kin // TILE
+    row_slices = [(0, M, spec_name)]
+
+    g2d_out = vtq_g2d.quantize_rows_vtq_gptq2d_batched(
+        W_rot_b,
+        H_reg_b,
+        G_factors,
+        spec_name,
+        vtq_mod=sys.modules[__name__],
+        weight_mode=gptq2d_weight_mode,
+        emit_pack=emit_pack,
+    )
+    del W_rot_b, H_reg_b
+
+    G_nat_b = g2d_out["G_nat"]
+    d_row_b = g2d_out["d_row"]
+    u_sb_b = g2d_out["u_sb"]
+    g_sub_b = g2d_out["g_sub"]
+    c_all_b = g2d_out["c_all"]
+    u_all_b = g2d_out["u_all"]
+
+    results: List[Tuple[Optional[Dict[str, object]], torch.Tensor]] = []
+    for b in range(B):
+        suh_fp16 = suhs_fp16[b]
+        d_eff = d_row_b[b].float().unsqueeze(1) * (u_sb_b[b].float() * float(U_SB_UNIT))
+        W_rot_hat = (G_nat_b[b].view(M, nblocks, TILE) * d_eff.unsqueeze(-1)).reshape(M, Kin)
+        W_hat_eff = apply_vtq_rot(W_rot_hat, rot_block=rot_block, transpose=True) * suh_fp16.float().unsqueeze(0)
+        pack_dict = None
+        if emit_pack:
+            pack_dict = {
+                "row_slices": row_slices,
+                "c_all": c_all_b[b].contiguous(),
+                "u_all": u_all_b[b].contiguous(),
+                "g_sub": g_sub_b[b].contiguous(),
+                "u_sb": u_sb_b[b].contiguous(),
+                "d_row": d_row_b[b].contiguous(),
+                "suh": suh_fp16,
+                "rot_block": rot_block,
+                "W_hat_rot": W_rot_hat,
+            }
+            if orig_shape != (M, Kin):
+                pack_dict["orig_shape"] = [int(orig_shape[0]), int(orig_shape[1])]
+        W_hat_out = W_hat_eff[: orig_shape[0], : orig_shape[1]].contiguous() if orig_shape != (M, Kin) else W_hat_eff
+        results.append((pack_dict, W_hat_out))
+    return results
 
 
 # =================================================================================================

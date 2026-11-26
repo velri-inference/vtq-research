@@ -1,0 +1,537 @@
+{
+  "model": "Llama-3.1-8B-Instruct",
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "seq_len": 1024,
+  "n_mc": 2,
+  "cal_reshaped": [
+    128,
+    1024
+  ],
+  "runs": {
+    "32": {
+      "n_seqs": 32,
+      "tokens": 32768,
+      "wall_sec": 47.17,
+      "out_dir": "/content/work/sketch_b_out/sketch_b_32",
+      "all_64_summary": {
+        "cos_full": {
+          "mean": 0.36743,
+          "min": 0.07703,
+          "max": 0.66905
+        },
+        "cos_offdiag": {
+          "mean": 0.24327,
+          "min": 0.03255,
+          "max": 0.66214
+        },
+        "cos_diag": {
+          "mean": 0.99238,
+          "min": 0.94738,
+          "max": 0.99863
+        },
+        "cos_L_unit": {
+          "mean": 0.35032,
+          "min": 0.06705,
+          "max": 0.52205
+        },
+        "eff_rank_sb": {
+          "mean": 315.37516,
+          "min": 21.14,
+          "max": 671.63
+        },
+        "eff_rank_yaqa": {
+          "mean": 2107.95797,
+          "min": 110.87,
+          "max": 3289.88
+        },
+        "eff_rank_ratio": {
+          "mean": 0.15448,
+          "min": 0.0083,
+          "max": 0.6287
+        }
+      },
+      "by_proj_summary": {
+        "o": {
+          "cos_full": {
+            "mean": 0.30579,
+            "min": 0.07703,
+            "max": 0.40168
+          },
+          "cos_offdiag": {
+            "mean": 0.20168,
+            "min": 0.03255,
+            "max": 0.30171
+          },
+          "cos_diag": {
+            "mean": 0.9914,
+            "min": 0.94738,
+            "max": 0.9968
+          },
+          "cos_L_unit": {
+            "mean": 0.32264,
+            "min": 0.23518,
+            "max": 0.42338
+          },
+          "eff_rank_sb": {
+            "mean": 203.10563,
+            "min": 21.14,
+            "max": 410.02
+          },
+          "eff_rank_yaqa": {
+            "mean": 2029.03406,
+            "min": 300.47,
+            "max": 3135.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.10286,
+            "min": 0.0083,
+            "max": 0.1726
+          }
+        },
+        "down": {
+          "cos_full": {
+            "mean": 0.42908,
+            "min": 0.11736,
+            "max": 0.66905
+          },
+          "cos_offdiag": {
+            "mean": 0.28487,
+            "min": 0.07916,
+            "max": 0.66214
+          },
+          "cos_diag": {
+            "mean": 0.99336,
+            "min": 0.96252,
+            "max": 0.99863
+          },
+          "cos_L_unit": {
+            "mean": 0.378,
+            "min": 0.06705,
+            "max": 0.52205
+          },
+          "eff_rank_sb": {
+            "mean": 427.64469,
+            "min": 26.43,
+            "max": 671.63
+          },
+          "eff_rank_yaqa": {
+            "mean": 2186.88188,
+            "min": 110.87,
+            "max": 3289.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.2061,
+            "min": 0.0158,
+            "max": 0.6287
+          }
+        }
+      },
+      "selected_layers": {
+        "L0_o": {
+          "cos_full": 0.28504,
+          "cos_offdiag": 0.2538,
+          "cos_diag": 0.97103,
+          "cos_L_unit": 0.23518,
+          "eff_rank_sb": 51.86,
+          "eff_rank_yaqa": 300.47,
+          "eff_rank_ratio": 0.1726
+        },
+        "L0_down": {
+          "cos_full": 0.21015,
+          "cos_offdiag": 0.16755,
+          "cos_diag": 0.977,
+          "cos_L_unit": 0.30969,
+          "eff_rank_sb": 53.79,
+          "eff_rank_yaqa": 935.61,
+          "eff_rank_ratio": 0.0575
+        },
+        "L15_o": {
+          "cos_full": 0.34876,
+          "cos_offdiag": 0.25812,
+          "cos_diag": 0.99286,
+          "cos_L_unit": 0.41464,
+          "eff_rank_sb": 195.68,
+          "eff_rank_yaqa": 1795.9,
+          "eff_rank_ratio": 0.109
+        },
+        "L15_down": {
+          "cos_full": 0.52497,
+          "cos_offdiag": 0.379,
+          "cos_diag": 0.9955,
+          "cos_L_unit": 0.45445,
+          "eff_rank_sb": 564.76,
+          "eff_rank_yaqa": 2350.68,
+          "eff_rank_ratio": 0.2403
+        },
+        "L31_o": {
+          "cos_full": 0.31413,
+          "cos_offdiag": 0.27792,
+          "cos_diag": 0.99061,
+          "cos_L_unit": 0.40002,
+          "eff_rank_sb": 89.6,
+          "eff_rank_yaqa": 891.41,
+          "eff_rank_ratio": 0.1005
+        },
+        "L31_down": {
+          "cos_full": 0.66905,
+          "cos_offdiag": 0.66214,
+          "cos_diag": 0.99207,
+          "cos_L_unit": 0.48274,
+          "eff_rank_sb": 69.7,
+          "eff_rank_yaqa": 110.87,
+          "eff_rank_ratio": 0.6287
+        }
+      }
+    },
+    "64": {
+      "n_seqs": 64,
+      "tokens": 65536,
+      "wall_sec": 82.15,
+      "out_dir": "/content/work/sketch_b_out/sketch_b_64",
+      "all_64_summary": {
+        "cos_full": {
+          "mean": 0.46665,
+          "min": 0.11754,
+          "max": 0.72325
+        },
+        "cos_offdiag": {
+          "mean": 0.32384,
+          "min": 0.05128,
+          "max": 0.7022
+        },
+        "cos_diag": {
+          "mean": 0.99524,
+          "min": 0.97516,
+          "max": 0.99893
+        },
+        "cos_L_unit": {
+          "mean": 0.40527,
+          "min": 0.09008,
+          "max": 0.61032
+        },
+        "eff_rank_sb": {
+          "mean": 486.13359,
+          "min": 48.13,
+          "max": 956.68
+        },
+        "eff_rank_yaqa": {
+          "mean": 2107.95797,
+          "min": 110.87,
+          "max": 3289.88
+        },
+        "eff_rank_ratio": {
+          "mean": 0.23794,
+          "min": 0.0188,
+          "max": 0.7769
+        }
+      },
+      "by_proj_summary": {
+        "o": {
+          "cos_full": {
+            "mean": 0.4018,
+            "min": 0.11754,
+            "max": 0.51606
+          },
+          "cos_offdiag": {
+            "mean": 0.277,
+            "min": 0.05128,
+            "max": 0.46701
+          },
+          "cos_diag": {
+            "mean": 0.99457,
+            "min": 0.97516,
+            "max": 0.99778
+          },
+          "cos_L_unit": {
+            "mean": 0.37178,
+            "min": 0.26745,
+            "max": 0.49066
+          },
+          "eff_rank_sb": {
+            "mean": 330.1775,
+            "min": 48.13,
+            "max": 628.45
+          },
+          "eff_rank_yaqa": {
+            "mean": 2029.03406,
+            "min": 300.47,
+            "max": 3135.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.16921,
+            "min": 0.0188,
+            "max": 0.3035
+          }
+        },
+        "down": {
+          "cos_full": {
+            "mean": 0.53149,
+            "min": 0.18066,
+            "max": 0.72325
+          },
+          "cos_offdiag": {
+            "mean": 0.37067,
+            "min": 0.12031,
+            "max": 0.7022
+          },
+          "cos_diag": {
+            "mean": 0.99591,
+            "min": 0.98134,
+            "max": 0.99893
+          },
+          "cos_L_unit": {
+            "mean": 0.43876,
+            "min": 0.09008,
+            "max": 0.61032
+          },
+          "eff_rank_sb": {
+            "mean": 642.08969,
+            "min": 51.47,
+            "max": 956.68
+          },
+          "eff_rank_yaqa": {
+            "mean": 2186.88188,
+            "min": 110.87,
+            "max": 3289.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.30667,
+            "min": 0.0384,
+            "max": 0.7769
+          }
+        }
+      },
+      "selected_layers": {
+        "L0_o": {
+          "cos_full": 0.50127,
+          "cos_offdiag": 0.46701,
+          "cos_diag": 0.99392,
+          "cos_L_unit": 0.26745,
+          "eff_rank_sb": 91.19,
+          "eff_rank_yaqa": 300.47,
+          "eff_rank_ratio": 0.3035
+        },
+        "L0_down": {
+          "cos_full": 0.24261,
+          "cos_offdiag": 0.18772,
+          "cos_diag": 0.98466,
+          "cos_L_unit": 0.36283,
+          "eff_rank_sb": 84.98,
+          "eff_rank_yaqa": 935.61,
+          "eff_rank_ratio": 0.0908
+        },
+        "L15_o": {
+          "cos_full": 0.45712,
+          "cos_offdiag": 0.35232,
+          "cos_diag": 0.99411,
+          "cos_L_unit": 0.47801,
+          "eff_rank_sb": 320.99,
+          "eff_rank_yaqa": 1795.9,
+          "eff_rank_ratio": 0.1787
+        },
+        "L15_down": {
+          "cos_full": 0.64294,
+          "cos_offdiag": 0.49258,
+          "cos_diag": 0.99481,
+          "cos_L_unit": 0.53074,
+          "eff_rank_sb": 824.88,
+          "eff_rank_yaqa": 2350.68,
+          "eff_rank_ratio": 0.3509
+        },
+        "L31_o": {
+          "cos_full": 0.40863,
+          "cos_offdiag": 0.36778,
+          "cos_diag": 0.99423,
+          "cos_L_unit": 0.45544,
+          "eff_rank_sb": 141.22,
+          "eff_rank_yaqa": 891.41,
+          "eff_rank_ratio": 0.1584
+        },
+        "L31_down": {
+          "cos_full": 0.70921,
+          "cos_offdiag": 0.7022,
+          "cos_diag": 0.99414,
+          "cos_L_unit": 0.54255,
+          "eff_rank_sb": 86.13,
+          "eff_rank_yaqa": 110.87,
+          "eff_rank_ratio": 0.7769
+        }
+      }
+    },
+    "128": {
+      "n_seqs": 128,
+      "tokens": 131072,
+      "wall_sec": 156.97,
+      "out_dir": "/content/work/sketch_b_out/sketch_b_128",
+      "all_64_summary": {
+        "cos_full": {
+          "mean": 0.56653,
+          "min": 0.19236,
+          "max": 0.80314
+        },
+        "cos_offdiag": {
+          "mean": 0.40655,
+          "min": 0.09336,
+          "max": 0.75194
+        },
+        "cos_diag": {
+          "mean": 0.99674,
+          "min": 0.98258,
+          "max": 0.99927
+        },
+        "cos_L_unit": {
+          "mean": 0.45214,
+          "min": 0.12269,
+          "max": 0.67462
+        },
+        "eff_rank_sb": {
+          "mean": 713.83656,
+          "min": 93.5,
+          "max": 1421.36
+        },
+        "eff_rank_yaqa": {
+          "mean": 2107.95797,
+          "min": 110.87,
+          "max": 3289.88
+        },
+        "eff_rank_ratio": {
+          "mean": 0.34573,
+          "min": 0.0548,
+          "max": 0.8493
+        }
+      },
+      "by_proj_summary": {
+        "o": {
+          "cos_full": {
+            "mean": 0.49517,
+            "min": 0.19236,
+            "max": 0.6285
+          },
+          "cos_offdiag": {
+            "mean": 0.34984,
+            "min": 0.09336,
+            "max": 0.51941
+          },
+          "cos_diag": {
+            "mean": 0.99582,
+            "min": 0.98258,
+            "max": 0.99864
+          },
+          "cos_L_unit": {
+            "mean": 0.41258,
+            "min": 0.30005,
+            "max": 0.54527
+          },
+          "eff_rank_sb": {
+            "mean": 510.2975,
+            "min": 93.5,
+            "max": 916.52
+          },
+          "eff_rank_yaqa": {
+            "mean": 2029.03406,
+            "min": 300.47,
+            "max": 3135.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.26129,
+            "min": 0.0548,
+            "max": 0.5749
+          }
+        },
+        "down": {
+          "cos_full": {
+            "mean": 0.63789,
+            "min": 0.27466,
+            "max": 0.80314
+          },
+          "cos_offdiag": {
+            "mean": 0.46327,
+            "min": 0.20736,
+            "max": 0.75194
+          },
+          "cos_diag": {
+            "mean": 0.99766,
+            "min": 0.99113,
+            "max": 0.99927
+          },
+          "cos_L_unit": {
+            "mean": 0.4917,
+            "min": 0.12269,
+            "max": 0.67462
+          },
+          "eff_rank_sb": {
+            "mean": 917.37563,
+            "min": 94.16,
+            "max": 1421.36
+          },
+          "eff_rank_yaqa": {
+            "mean": 2186.88188,
+            "min": 110.87,
+            "max": 3289.88
+          },
+          "eff_rank_ratio": {
+            "mean": 0.43017,
+            "min": 0.0823,
+            "max": 0.8493
+          }
+        }
+      },
+      "selected_layers": {
+        "L0_o": {
+          "cos_full": 0.56164,
+          "cos_offdiag": 0.51941,
+          "cos_diag": 0.98258,
+          "cos_L_unit": 0.30005,
+          "eff_rank_sb": 172.75,
+          "eff_rank_yaqa": 300.47,
+          "eff_rank_ratio": 0.5749
+        },
+        "L0_down": {
+          "cos_full": 0.37178,
+          "cos_offdiag": 0.29624,
+          "cos_diag": 0.99302,
+          "cos_L_unit": 0.42916,
+          "eff_rank_sb": 187.57,
+          "eff_rank_yaqa": 935.61,
+          "eff_rank_ratio": 0.2005
+        },
+        "L15_o": {
+          "cos_full": 0.56636,
+          "cos_offdiag": 0.45069,
+          "cos_diag": 0.99558,
+          "cos_L_unit": 0.52708,
+          "eff_rank_sb": 491.2,
+          "eff_rank_yaqa": 1795.9,
+          "eff_rank_ratio": 0.2735
+        },
+        "L15_down": {
+          "cos_full": 0.73064,
+          "cos_offdiag": 0.58699,
+          "cos_diag": 0.99571,
+          "cos_L_unit": 0.58885,
+          "eff_rank_sb": 1065.22,
+          "eff_rank_yaqa": 2350.68,
+          "eff_rank_ratio": 0.4532
+        },
+        "L31_o": {
+          "cos_full": 0.53197,
+          "cos_offdiag": 0.48485,
+          "cos_diag": 0.99692,
+          "cos_L_unit": 0.48452,
+          "eff_rank_sb": 241.49,
+          "eff_rank_yaqa": 891.41,
+          "eff_rank_ratio": 0.2709
+        },
+        "L31_down": {
+          "cos_full": 0.7581,
+          "cos_offdiag": 0.75194,
+          "cos_diag": 0.99527,
+          "cos_L_unit": 0.58557,
+          "eff_rank_sb": 94.16,
+          "eff_rank_yaqa": 110.87,
+          "eff_rank_ratio": 0.8493
+        }
+      }
+    }
+  }
+}

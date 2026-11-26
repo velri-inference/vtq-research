@@ -519,10 +519,12 @@ def _tcq_lib():
         import subprocess
         import hashlib
         src = Path(__file__).with_name("cuda") / "tcq_viterbi.cu"
-        # name includes the source hash: a rebuild doesn't overwrite a .so already loaded into running processes
-        so = src.with_name(f"libtcq_viterbi_{hashlib.sha1(src.read_bytes()).hexdigest()[:10]}.so")
+        maj, mn = torch.cuda.get_device_capability()
+        arch = f"sm_{maj}{mn}"
+        # name includes source hash + GPU arch so rebuilding across GPUs never loads a mismatched cubin
+        so = src.with_name(f"libtcq_viterbi_{hashlib.sha1(src.read_bytes()).hexdigest()[:10]}_{arch}.so")
         if not so.exists():
-            subprocess.run(["/usr/local/cuda/bin/nvcc", "-O3", "-arch=sm_120", "-shared", "-Xcompiler", "-fPIC",
+            subprocess.run(["/usr/local/cuda/bin/nvcc", "-O3", f"-arch={arch}", "-shared", "-Xcompiler", "-fPIC",
                             "-o", str(so), str(src)], check=True)
         lib = ctypes.CDLL(str(so))
         lib.tcq_viterbi.restype = ctypes.c_int

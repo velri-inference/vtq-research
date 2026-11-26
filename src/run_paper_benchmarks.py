@@ -309,7 +309,14 @@ class StreamingCausalEvaluator:
         self.device = device
         full_cfg = AutoConfig.from_pretrained(str(model_dir))
         self.config = getattr(full_cfg, "text_config", full_cfg)
-        if getattr(self.config, "_experts_implementation", None) is None:
+        is_moe_cfg = (
+            bool(getattr(self.config, "enable_moe_block", False))
+            or any(
+                int(getattr(self.config, attr, 0) or 0) > 1
+                for attr in ("num_experts", "num_local_experts", "n_routed_experts")
+            )
+        )
+        if is_moe_cfg and getattr(self.config, "_experts_implementation", None) is None:
             self.config._experts_implementation = "grouped_mm"
         with torch.device("meta"):
             self.model = AutoModelForCausalLM.from_config(self.config, dtype=torch.bfloat16, attn_implementation="sdpa")
@@ -1045,14 +1052,13 @@ def quantize_and_export_vtq_full(
                     rw = fisher[(l_idx, nm)].to(dev)
                     row_sl = assignment[(l_idx, nm)]
                     dm = 0.30 if nm.endswith(("down_proj", "o_proj", "out_proj")) else 0.20
-                    G_out = g_provider.get(l_idx, nm, W.shape[0], dev) if g_provider is not None else None
+                    G_arg = g_provider.get_factors(l_idx, nm, W.shape[0], dev) if g_provider is not None else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
                         W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1,
-                        G_out=G_out, gptq2d=(G_out is not None),
+                        G_out=G_arg, gptq2d=(G_arg is not None),
                         gptq2d_sigma_reg=g_provider.sigma_reg if g_provider is not None else 0.10,
                     )
-                    del G_out
                     wr.add_matrix(f"{lay_pfx}.{nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     quantized_source_keys.add(f"{lay_pfx}.{nm}.weight")
@@ -1096,26 +1102,77 @@ def quantize_and_export_vtq_full(
                     ex_obj.gate_up_proj.data[e].copy_(w_hat.to(W.dtype))
                     del w_hat
 
+                G_moe_factors = (
+                    g_provider.get_factors(l_idx, f"{ex_pfx}.0.down_proj", ex_obj.down_proj.shape[1], dev)
+                    if g_provider is not None
+                    else None
+                )
+                pending_dn: List[Tuple[int, torch.Tensor]] = []
+
                 def _q_dn(e, He):
                     nonlocal lin_bytes_sum
+                    if G_moe_factors is not None:
+                        pending_dn.append((e, He))
+                        return
                     full_nm = f"{ex_pfx}.{e}.down_proj"
                     W = ex_obj.down_proj.data[e]
                     rw = fisher[(l_idx, full_nm)].to(dev)
                     row_sl = assignment[(l_idx, full_nm)]
-                    G_out = g_provider.get(l_idx, full_nm, W.shape[0], dev) if g_provider is not None else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
                         W, He, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1,
-                        G_out=G_out, gptq2d=(G_out is not None),
-                        gptq2d_sigma_reg=g_provider.sigma_reg if g_provider is not None else 0.10,
                     )
-                    del G_out
                     wr.add_matrix(f"{lay_pfx}.{full_nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     ex_obj.down_proj.data[e].copy_(w_hat.to(W.dtype))
                     del w_hat
 
                 run_layer_moe_hessians(lay, moe_in, dev, _q_gu, _q_dn)
+                if pending_dn:
+                    by_sp: Dict[str, List[Tuple[int, torch.Tensor]]] = {}
+                    multi_sl: List[Tuple[int, torch.Tensor]] = []
+                    for e, He in pending_dn:
+                        row_sl = assignment[(l_idx, f"{ex_pfx}.{e}.down_proj")]
+                        if len(row_sl) == 1:
+                            by_sp.setdefault(row_sl[0][2], []).append((e, He))
+                        else:
+                            multi_sl.append((e, He))
+                    pending_dn.clear()
+                    batch_sz = 32
+                    for sp, items in by_sp.items():
+                        for i0 in range(0, len(items), batch_sz):
+                            chunk = items[i0 : i0 + batch_sz]
+                            es = [e for e, _ in chunk]
+                            Ws = [ex_obj.down_proj.data[e] for e in es]
+                            Hs = [He for _, He in chunk]
+                            rws = [fisher[(l_idx, f"{ex_pfx}.{e}.down_proj")].to(dev) for e in es]
+                            seeds = [sqm._seed(l_idx, f"dn{e}") for e in es]
+                            outs = vtq.quantize_matrices_vtq_gptq2d_batch(
+                                Ws, Hs, sp, seeds, G_moe_factors, damp=0.30, row_weights_list=rws, rot_block=-1, emit_pack=True
+                            )
+                            for e, (pack_d, w_hat) in zip(es, outs):
+                                full_nm = f"{ex_pfx}.{e}.down_proj"
+                                pos_before = wr.pos
+                                wr.add_matrix(f"{lay_pfx}.{full_nm}", pack_d, verify=False)
+                                lin_bytes_sum += (wr.pos - pos_before)
+                                ex_obj.down_proj.data[e].copy_(w_hat.to(ex_obj.down_proj.dtype))
+                            del outs, Hs, rws, Ws
+                    for e, He in multi_sl:
+                        full_nm = f"{ex_pfx}.{e}.down_proj"
+                        W = ex_obj.down_proj.data[e]
+                        rw = fisher[(l_idx, full_nm)].to(dev)
+                        row_sl = assignment[(l_idx, full_nm)]
+                        pos_before = wr.pos
+                        _, w_hat, _ = vtq.quantize_matrix_vtq(
+                            W, He, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1,
+                            G_out=G_moe_factors, gptq2d=True, gptq2d_sigma_reg=g_provider.sigma_reg,
+                        )
+                        wr.add_matrix(f"{lay_pfx}.{full_nm}", vtq.PACK.pop("matrix"), verify=False)
+                        lin_bytes_sum += (wr.pos - pos_before)
+                        ex_obj.down_proj.data[e].copy_(w_hat.to(W.dtype))
+                        del w_hat
+                    del by_sp, multi_sl
+                    torch.cuda.empty_cache()
                 # Mark fused or per-expert checkpoint keys as replaced
                 for kind in ("gate_up_proj", "down_proj"):
                     fk = f"{lay_pfx}.{ex_pfx}.{kind}"
