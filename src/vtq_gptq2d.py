@@ -43,6 +43,16 @@ DEFAULT_GPTQ2D_TARGETS: Tuple[str, ...] = (
     "mlp.shared_expert.down_proj",
     "experts.*.down_proj",
 )
+FIVE_OUT_GPTQ2D_TARGETS: Tuple[str, ...] = (
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "linear_attn.out_proj",
+    "mlp.down_proj",
+    "mlp.shared_expert.down_proj",
+    "experts.*.down_proj",
+)
 
 # Mapping from canonical submodule suffixes to YAQA / RelaxML short Hessian names
 _SUBNAME_TO_YAQA_SHORT = {
@@ -366,6 +376,114 @@ class OutHessianProvider:
         else:
             del G_raw
         return self._factor_cache[ck]
+
+
+class InHessianProvider:
+    """
+    Resolves `(layer_idx, subname)` -> normalized KL-weighted input Hessian `H_in [K, K]` (float32)
+    from a YAQA / Sketch-A directory (`{l}_{short}_hin.pt`), HF repo, or dict, and blends it with
+    the quantized-stream activation covariance `H_stream`:
+        H_use = blend * norm(H_in) + (1 - blend) * norm(H_stream)
+    Validated in `exp35` (`blend = 0.5`): combines end-to-end KL weighting with cross-layer
+    quantized-stream error compensation across all projections without altering `.vtq` v2.
+    """
+
+    def __init__(
+        self,
+        source: Union[str, Path, Dict[Tuple[int, str], torch.Tensor]],
+        *,
+        blend: float = 0.50,
+        cache_dir: Optional[Union[str, Path]] = None,
+    ):
+        self.blend = float(blend)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self._dict: Optional[Dict[Tuple[int, str], torch.Tensor]] = None
+        self._local_dir: Optional[Path] = None
+        self._hf_repo: Optional[str] = None
+        if isinstance(source, dict):
+            self._dict = source
+        else:
+            p = Path(source)
+            if p.exists() and p.is_dir():
+                self._local_dir = p
+            else:
+                self._hf_repo = str(source)
+
+    @staticmethod
+    def _norm_spd(H: torch.Tensor) -> torch.Tensor:
+        H32 = H.float()
+        H32 = 0.5 * (H32 + H32.T)
+        dm = H32.diagonal().mean().clamp(min=1e-12)
+        return H32 / dm
+
+    def _candidate_names(self, layer_idx: int, full_name: str) -> List[str]:
+        short = _short_yaqa_name(full_name)
+        cand = [f"{layer_idx}_{full_name}_hin.pt"]
+        if short is not None:
+            cand.append(f"{layer_idx}_{short}_hin.pt")
+        return cand
+
+    @torch.no_grad()
+    def get(self, layer_idx: int, full_name: str, K: int, device: torch.device) -> Optional[torch.Tensor]:
+        if self._dict is not None:
+            t = self._dict.get((layer_idx, full_name))
+            if t is None:
+                short = _short_yaqa_name(full_name)
+                if short is not None:
+                    t = self._dict.get((layer_idx, short))
+            if t is None:
+                return None
+            H64 = flat_to_sym(t.to(device=device, dtype=torch.float64), K)
+            H32 = self._norm_spd(H64)
+            del H64
+            return H32
+
+        cand_names = self._candidate_names(layer_idx, full_name)
+        if self._local_dir is not None:
+            for fn in cand_names:
+                fp = self._local_dir / fn
+                if fp.exists():
+                    H64 = load_output_hessian_file(fp, K, device)
+                    H32 = self._norm_spd(H64)
+                    del H64
+                    return H32
+            return None
+
+        if self._hf_repo is not None:
+            from huggingface_hub import hf_hub_download
+
+            kw = {"local_dir": str(self.cache_dir)} if self.cache_dir is not None else {}
+            for fn in reversed(cand_names):
+                try:
+                    fp = hf_hub_download(repo_id=self._hf_repo, filename=fn, **kw)
+                    H64 = load_output_hessian_file(fp, K, device)
+                    H32 = self._norm_spd(H64)
+                    del H64
+                    return H32
+                except Exception:
+                    continue
+        return None
+
+    @torch.no_grad()
+    def blend_with(
+        self,
+        layer_idx: int,
+        full_name: str,
+        K: int,
+        device: torch.device,
+        H_stream: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if self.blend <= 0.0:
+            return H_stream
+        H_in = self.get(layer_idx, full_name, K, device)
+        if H_in is None:
+            return H_stream
+        if H_stream is None or self.blend >= 1.0:
+            return H_in
+        Hs = self._norm_spd(H_stream)
+        out = self.blend * H_in + (1.0 - self.blend) * Hs
+        del H_in, Hs
+        return out
 
 
 @torch.no_grad()

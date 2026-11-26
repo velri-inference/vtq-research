@@ -921,6 +921,7 @@ def quantize_and_export_vtq_full(
     out_vtq_path: Path,
     codec: NativeVtqCodec,
     g_provider=None,
+    hin_provider=None,
 ) -> dict:
     dev = ev.device
     ev.restore_clean_embed_and_head()
@@ -1052,13 +1053,16 @@ def quantize_and_export_vtq_full(
                     rw = fisher[(l_idx, nm)].to(dev)
                     row_sl = assignment[(l_idx, nm)]
                     dm = 0.30 if nm.endswith(("down_proj", "o_proj", "out_proj")) else 0.20
+                    H_use = hin_provider.blend_with(l_idx, nm, W.shape[1], dev, H_g) if hin_provider is not None else H_g
                     G_arg = g_provider.get_factors(l_idx, nm, W.shape[0], dev) if g_provider is not None else None
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, H_g, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1,
+                        W, H_use, row_sl, seed=sqm._seed(l_idx, nm), damp=dm, row_weights=rw, rot_block=-1,
                         G_out=G_arg, gptq2d=(G_arg is not None),
                         gptq2d_sigma_reg=g_provider.sigma_reg if g_provider is not None else 0.10,
                     )
+                    if H_use is not H_g:
+                        del H_use
                     wr.add_matrix(f"{lay_pfx}.{nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     quantized_source_keys.add(f"{lay_pfx}.{nm}.weight")
@@ -2011,8 +2015,17 @@ def run_vtq_phase(
     out_json: Path,
     work_dir: Path,
     g_provider=None,
+    hin_provider=None,
+    method_tag: Optional[str] = None,
 ):
-    key_prefix = "VTQ-2D" if g_provider is not None else "VTQ"
+    if method_tag:
+        key_prefix = method_tag
+    elif g_provider is not None and hin_provider is not None:
+        key_prefix = "VTQ-YAQA"
+    elif g_provider is not None:
+        key_prefix = "VTQ-2D"
+    else:
+        key_prefix = "VTQ"
     todo = [b for b in TARGET_BPWS if f"{key_prefix}:{b:.1f}" not in results["methods"]]
     if not todo:
         return
@@ -2026,10 +2039,11 @@ def run_vtq_phase(
 
     for b_tgt in todo:
         mkey = f"{key_prefix}:{b_tgt:.1f}"
-        file_tag = "vtq2d" if g_provider is not None else "vtq"
+        file_tag = key_prefix.lower().replace("-", "_")
         vtq_file = work_dir / f"model_{file_tag}_{b_tgt:.1f}.vtq"
         q_meta = quantize_and_export_vtq_full(
-            ev, cal_ids, fisher, profile, H_head, b_tgt, vtq_file, codec, g_provider=g_provider
+            ev, cal_ids, fisher, profile, H_head, b_tgt, vtq_file, codec,
+            g_provider=g_provider, hin_provider=hin_provider,
         )
 
         loader = VtqDiskLoader(vtq_file, codec, ev.prefix, ev.tie_word_embeddings)
@@ -2089,8 +2103,12 @@ def main():
     ap.add_argument("--target-bpws", nargs="+", type=float, default=None)
     ap.add_argument("--download-model", action="store_true", help="Automatically download the HF BF16 checkpoint if missing.")
     ap.add_argument("--gptq2d", action="store_true", help="Opt-in: enable two-sided GPTQ-2D rounding on o_proj + down_proj (experimental).")
+    ap.add_argument("--gptq2d-5out", action="store_true", help="Expand --gptq2d targets to all 5 compact outputs (q, k, v, o, down + MoE).")
     ap.add_argument("--gptq2d-hess", type=str, default=None, help="Local dir or HF repo id of 2-sided output Hessians (*_hout.pt) for --gptq2d.")
     ap.add_argument("--gptq2d-sigma", type=float, default=0.10, help="Output Hessian ridge damping sigma_reg for --gptq2d (default: 0.10).")
+    ap.add_argument("--yaqa-hin", type=str, default=None, help="Opt-in: local dir or HF repo id of KL-weighted input Hessians (*_hin.pt).")
+    ap.add_argument("--yaqa-hin-blend", type=float, default=0.50, help="Blend weight for --yaqa-hin with H_stream (default: 0.50).")
+    ap.add_argument("--method-tag", type=str, default=None, help="Optional method key prefix in output JSON (e.g. VTQ-SketchA, VTQ-YAQA).")
     args = ap.parse_args()
     if args.target_bpws:
         global TARGET_BPWS
@@ -2153,20 +2171,34 @@ def main():
         if ph == "vtq":
             codec = build_vtq_native_codec(args.work_dir)
             g_provider = None
+            hin_provider = None
             if args.gptq2d:
                 if not args.gptq2d_hess:
                     raise ValueError("--gptq2d requires --gptq2d-hess <local_dir_or_hf_repo>")
-                from src.vtq_gptq2d import OutHessianProvider
+                from src.vtq_gptq2d import (
+                    DEFAULT_GPTQ2D_TARGETS,
+                    FIVE_OUT_GPTQ2D_TARGETS,
+                    OutHessianProvider,
+                )
 
                 g_provider = OutHessianProvider(
                     args.gptq2d_hess,
+                    targets=(FIVE_OUT_GPTQ2D_TARGETS if args.gptq2d_5out else DEFAULT_GPTQ2D_TARGETS),
                     sigma_reg=args.gptq2d_sigma,
                     cache_dir=m_work / "gptq2d_hess",
+                )
+            if args.yaqa_hin:
+                from src.vtq_gptq2d import InHessianProvider
+
+                hin_provider = InHessianProvider(
+                    args.yaqa_hin,
+                    blend=args.yaqa_hin_blend,
+                    cache_dir=m_work / "yaqa_hin",
                 )
             run_vtq_phase(
                 ev, cal_ids, m_work / "fisher_neutral.pt", m_work / "vtq_profile.pt",
                 codec, traces, ref_final, results, out_json, m_work,
-                g_provider=g_provider,
+                g_provider=g_provider, hin_provider=hin_provider, method_tag=args.method_tag,
             )
         elif ph == "gguf":
             shim = LibGgmlShim(args.llama_cpp_dir, args.work_dir)

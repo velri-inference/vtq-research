@@ -1,0 +1,107 @@
+{
+  "model_dir": "/content/work/models/Llama-3.1-8B-Instruct",
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "n_seqs": 256,
+  "seq_len": 512,
+  "batch_size": 4,
+  "chunk_seqs": 128,
+  "save_hin": true,
+  "include_moe": true,
+  "trace_norm": false,
+  "wall_sec": 185.7,
+  "eff_rank_hout": {
+    "down": {
+      "count": 32,
+      "mean_eff_rank": 1407.1,
+      "min": 150.4,
+      "max": 2063.1
+    },
+    "k": {
+      "count": 32,
+      "mean_eff_rank": 16.1,
+      "min": 2.2,
+      "max": 24.9
+    },
+    "o": {
+      "count": 32,
+      "mean_eff_rank": 1239.3,
+      "min": 514.4,
+      "max": 1959.2
+    },
+    "q": {
+      "count": 32,
+      "mean_eff_rank": 33.6,
+      "min": 2.9,
+      "max": 74.9
+    },
+    "v": {
+      "count": 32,
+      "mean_eff_rank": 242.3,
+      "min": 31.4,
+      "max": 410.9
+    }
+  },
+  "eff_rank_hin": {
+    "down": {
+      "count": 32,
+      "mean_eff_rank": 371.0,
+      "min": 1.0,
+      "max": 913.6
+    },
+    "gate": {
+      "count": 32,
+      "mean_eff_rank": 288.3,
+      "min": 121.6,
+      "max": 607.5
+    },
+    "k": {
+      "count": 32,
+      "mean_eff_rank": 37.5,
+      "min": 7.1,
+      "max": 63.5
+    },
+    "o": {
+      "count": 32,
+      "mean_eff_rank": 85.3,
+      "min": 5.4,
+      "max": 203.6
+    },
+    "q": {
+      "count": 32,
+      "mean_eff_rank": 39.6,
+      "min": 6.1,
+      "max": 66.3
+    },
+    "up": {
+      "count": 32,
+      "mean_eff_rank": 275.9,
+      "min": 106.3,
+      "max": 631.2
+    },
+    "v": {
+      "count": 32,
+      "mean_eff_rank": 3.3,
+      "min": 1.5,
+      "max": 9.1
+    }
+  },
+  "calibration": {
+    "n_seqs": 256,
+    "seq_len": 512,
+    "total_tokens": 131072,
+    "seed": 20261125,
+    "provenance": {
+      "HuggingFaceFW/fineweb-edu:sample-10BT": 128,
+      "HuggingFaceFW/fineweb-2:rus_Cyrl": 10,
+      "HuggingFaceFW/fineweb-2:cmn_Hani": 10,
+      "HuggingFaceFW/fineweb-2:deu_Latn": 10,
+      "HuggingFaceFW/fineweb-2:fra_Latn": 10,
+      "HuggingFaceFW/fineweb-2:spa_Latn": 10,
+      "HuggingFaceFW/fineweb-2:jpn_Jpan": 10,
+      "HuggingFaceFW/fineweb-2:kor_Hang": 10,
+      "HuggingFaceFW/fineweb-2:arb_Arab": 10,
+      "HuggingFaceFW/fineweb-edu:sample-10BT_code": 48
+    },
+    "build_sec": 166.36
+  }
+}
