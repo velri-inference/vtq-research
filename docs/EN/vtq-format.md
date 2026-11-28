@@ -33,7 +33,15 @@ where:
 - $u_{\text{sb}} \in \{1, \dots, 255\}$ is the linear superblock multiplier stored in the tail of each super-tile (`16` bytes per `4,096` weights);
 - $\text{gain} \in \{1, \dots, 255\}^{2^h}$ is the `16`-weight subgroup gain bank ($h \in \{1, 2, 3\}$);
 - $Q(\text{lab}, u) \in [-127, +127]$ is the codebook level (`qmax = 127`, `TA + TB ≤ 127` for additive codebooks);
-- $\text{suh} \in \mathbb{F}_{16}^K$ and $\mathcal{R}_K = (H_{b_1} \otimes H_{b_2}) \otimes_{\text{outer}} \operatorname{DCT\text{-}II}_q$ (`rot_block = -1`) or block-wise `FWHT-256` (`rot_block = 256`).
+- $\text{suh} \in \mathbb{F}_{16}^K$ and $\mathcal{R}_K$ is the canonical **Inner-DCT** Kronecker transform (`rot_block ∈ {-1, -2}` — both map to the same transform in [`apply_vtq_rot`](../../src/vtq_format.py)) or block-wise `FWHT` (`rot_block > 0`, e.g. `256`). Factor $K = p_2 \cdot q$ with $p_2 = 2^a = K \mathbin{\&} (-K)$ ($p_2 \ge 32$) and odd $q = K / p_2$, and split $p_2 = b_1 b_2$ ($b_1 = 2^{\lfloor a/2 \rfloor}$, $b_2 = 2^{a - \lfloor a/2 \rfloor}$):
+  $$
+  \mathcal{R}_K = H_{2^a} \otimes \operatorname{DCT\text{-}II}_q = H_{b_1} \otimes \bigl(H_{b_2} \otimes D_q\bigr), \qquad
+  (D_q)_{m,n} = c_m \cos\!\left(\frac{\pi m (2n + 1)}{2q}\right),\;
+  c_0 = \sqrt{\frac{1}{q}},\; c_{m > 0} = \sqrt{\frac{2}{q}},
+  $$
+  where $\operatorname{DCT\text{-}II}_q$ acts on the **innermost** (stride-1, length-$q$) axis and $H_{2^a}$ is the normalized Sylvester Hadamard matrix ($H_1 = [1]$, $H_{2n} = \frac{1}{\sqrt{2}}\begin{bsmallmatrix}H_n & H_n \\ H_n & -H_n\end{bsmallmatrix}$). During reconstruction (decoding), the inverse applies $\mathcal{R}_K^\top = H_{2^a} \otimes D_q^\top$ (for power-of-two $K$, $q = 1$, $D_1 = [1]$, and $\mathcal{R}_K = H_{2^a}$).
+
+> **Verification vector (non-power-of-two inverse rotation):** for `K = 768` ($p_2 = 256, q = 3$), `rot_block = -1` (or `-2`), `suh = 1`, and unit vector $\widetilde{W} = e_1$ (a single `1.0` at zero-based index `1`, zeros elsewhere), the first three values of $\mathcal{R}_{768}^\top e_1$ are **`[0.04419417, 0.0, -0.04419417]`** ($\pm\sqrt{2}/32$, distinguishing Inner-DCT $H_{256}\otimes D_3^\top$ from Outer-DCT $D_3^\top\otimes H_{256}$, which would yield `[0.03608439, -0.03608439, 0.03608439]`).
 
 ---
 

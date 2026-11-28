@@ -991,7 +991,7 @@ def quantize_and_export_vtq_full(
     lin_bytes_sum = 0
 
     try:
-        # 1. Quantize `embed_tokens` (using `rot_block=-1` Outer-DCT; blended with `H_head` if tied!)
+        # 1. Quantize `embed_tokens` (using `rot_block=-1` Inner-DCT `H_{2^a} (x) DCT-II_q`; blended with `H_head` if tied!)
         W_emb = ev.clean_embed_cpu.to(dev, dtype=torch.float32)
         if ev.tie_word_embeddings:
             Hh = H_head_cpu.to(dev, dtype=torch.float32)

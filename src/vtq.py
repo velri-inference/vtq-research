@@ -357,7 +357,7 @@ def _get_spec_gpu_vtq(spec_name: str, dev: torch.device) -> Tuple[dict, torch.Te
 
 
 # =================================================================================================
-# 3. Core VTQ Matrix Quantizer (`Outer-DCT` + Natural `Block16-LDLQ` + `fp16 d_row * uint8 u_sb`)
+# 3. Core VTQ Matrix Quantizer (`Inner-DCT H_{2^a} (x) DCT-II_q` + Natural `Block16-LDLQ` + `fp16 d_row * uint8 u_sb`)
 # =================================================================================================
 
 @torch.no_grad()
@@ -379,7 +379,7 @@ def compute_suh_vtq(
     rot_block: int = -1,
     h_stripe: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Computes `suh[K]` `(p_w = 0.50, p_h = -0.25)` and applies `Outer-DCT` (`rot_block=-1`) or `FWHT-256` (`256`)."""
+    """Computes `suh[K]` `(p_w = 0.50, p_h = -0.25)` and applies canonical Inner-DCT `H_{2^a} (x) DCT-II_q` (`rot_block in (-1, -2)`) or `FWHT-256` (`256`)."""
     dev = W_f32.device
     Kin = W_f32.shape[1]
     signs = make_rademacher_signs(Kin, seed=seed, device=dev)
@@ -591,7 +591,7 @@ def _quantize_rows_vtq_ldlq(
 
 def resolve_rot_block(subname: Optional[str], rot_block: int = -1, rot_mode: str = "outer") -> int:
     """When `rot_mode == 'selective'`, uses 1-stage fused Block-256 FWHT (`256`) on `q/k/v/gate/up` and
-    full `Outer-DCT` (`-1`) only on `o_proj` / `down_proj`."""
+    full canonical Inner-DCT `H_{2^a} (x) DCT-II_q` (`-1`) only on `o_proj` / `down_proj`."""
     if rot_mode == "selective" and subname is not None:
         if any(tag in subname for tag in ("o_proj", "down_proj", "out_proj")):
             return -1
@@ -1517,7 +1517,7 @@ def profile_matrix_vtq(
     rot_block: int = -1,
     rot_mode: str = "outer",
 ):
-    """Profiles per-slice Fisher-weighted distortion under VTQ preconditioning (`suh` + `Outer-DCT` / `FWHT-256`)."""
+    """Profiles per-slice Fisher-weighted distortion under VTQ preconditioning (`suh` + `Inner-DCT H_{2^a} (x) DCT-II_q` / `FWHT-256`)."""
     dev = W.device
     rw = s_row.to(dev).float() if s_row is not None else None
     W_p, H_p, rw_p, (M_orig, _) = pad_wh_to_supertile(W.float(), H.float(), rw)

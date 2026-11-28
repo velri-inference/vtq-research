@@ -114,7 +114,8 @@ def _get_outer_kron_factors(K: int, device: torch.device):
 
 
 def apply_vtq_rot(X: torch.Tensor, rot_block: int = -1, transpose: bool = False) -> torch.Tensor:
-    """Applies `R_K^{outer} = DCT-II_q (x) H_{2^a}` (`rot_block = -1`), `Inner-DCT` (`-2`), or Block-FWHT (`> 0`)."""
+    """Applies canonical Inner-DCT Kronecker rotation `R_K = H_{2^a} (x) DCT-II_q` (`rot_block in (-1, -2)`),
+    Block-FWHT (`rot_block > 0`), or experimental Outer-DCT `DCT-II_q (x) H_{2^a}` (`rot_block < -2`)."""
     K = X.shape[-1]
     if rot_block > 0:
         return _apply_inner_rot(X, rot_block=rot_block, transpose=transpose)
@@ -1015,6 +1016,14 @@ def self_test(cpu_only: bool = False) -> dict:
             assert c_diff < 1e-6, f"Container roundtrip diff={c_diff}"
             report["container_roundtrip_max_diff"] = c_diff
             print(f"  [Container] `.vtq` roundtrip max_diff={c_diff:.2e} OK", flush=True)
+
+        # Verify non-power-of-two K=768 (256 * 3) canonical Inner-DCT vector for rot_block in (-1, -2)
+        e1 = torch.zeros((1, 768), dtype=torch.float32, device=dev)
+        e1[0, 1] = 1.0
+        ref3 = torch.tensor([math.sqrt(2.0) / 32.0, 0.0, -math.sqrt(2.0) / 32.0], dtype=torch.float32, device=dev)
+        for rb_chk in (-1, -2):
+            got3 = apply_vtq_rot(e1, rot_block=rb_chk, transpose=True)[0, :3]
+            assert torch.allclose(got3, ref3, atol=1e-6), f"rot_block={rb_chk} K=768 mismatch: {got3.tolist()}"
 
     return report
 

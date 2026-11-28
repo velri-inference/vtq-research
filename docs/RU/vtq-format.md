@@ -33,7 +33,15 @@ $$
 - $u_{\text{sb}} \in \{1, \dots, 255\}$ — линейный множитель суперблока, хранится в хвосте супер-тайла (`16` байт на `4096` весов);
 - $\text{gain} \in \{1, \dots, 255\}^{2^h}$ — банк усилений подгруппы из `16` весов ($h \in \{1, 2, 3\}$);
 - $Q(\text{lab}, u) \in [-127, +127]$ — уровень кодовой книги (`qmax = 127`, `TA + TB ≤ 127` для аддитивных книг);
-- $\text{suh} \in \mathbb{F}_{16}^K$ и $\mathcal{R}_K = (H_{b_1} \otimes H_{b_2}) \otimes_{\text{outer}} \operatorname{DCT\text{-}II}_q$ (`rot_block = -1`) либо поблочный `FWHT-256` (`rot_block = 256`).
+- $\text{suh} \in \mathbb{F}_{16}^K$, а $\mathcal{R}_K$ — каноническое **Inner-DCT** кронекерово вращение (`rot_block ∈ {-1, -2}` — оба значения ведут в одно и то же преобразование в [`apply_vtq_rot`](../../src/vtq_format.py)) либо поблочный `FWHT` (`rot_block > 0`, например `256`). Раскладываем $K = p_2 \cdot q$, где $p_2 = 2^a = K \mathbin{\&} (-K)$ ($p_2 \ge 32$), $q = K / p_2$ нечётно, и $p_2 = b_1 b_2$ ($b_1 = 2^{\lfloor a/2 \rfloor}$, $b_2 = 2^{a - \lfloor a/2 \rfloor}$):
+  $$
+  \mathcal{R}_K = H_{2^a} \otimes \operatorname{DCT\text{-}II}_q = H_{b_1} \otimes \bigl(H_{b_2} \otimes D_q\bigr), \qquad
+  (D_q)_{m,n} = c_m \cos\!\left(\frac{\pi m (2n + 1)}{2q}\right),\;
+  c_0 = \sqrt{\frac{1}{q}},\; c_{m > 0} = \sqrt{\frac{2}{q}},
+  $$
+  где $\operatorname{DCT\text{-}II}_q$ действует по **внутренней** оси длины $q$ (с шагом 1), а $H_{2^a}$ — нормированная матрица Адамара Сильвестра ($H_1 = [1]$, $H_{2n} = \frac{1}{\sqrt{2}}\begin{bsmallmatrix}H_n & H_n \\ H_n & -H_n\end{bsmallmatrix}$). При декодировании (обратном вращении) применяется $\mathcal{R}_K^\top = H_{2^a} \otimes D_q^\top$ (для степеней двойки $q = 1$, $D_1 = [1]$ и $\mathcal{R}_K = H_{2^a}$).
+
+> **Проверочный вектор (обратное вращение для не-степени двойки):** для `K = 768` ($p_2 = 256, q = 3$), `rot_block = -1` (или `-2`), `suh = 1` и вектора $\widetilde{W} = e_1$ (единица в позиции `1` с нуля, остальные нули) первые три значения $\mathcal{R}_{768}^\top e_1$ равны **`[0.04419417, 0.0, -0.04419417]`** ($\pm\sqrt{2}/32$; outer-DCT $D_3^\top \otimes H_{256}$ дал бы `[0.03608439, -0.03608439, 0.03608439]`).
 
 ---
 
