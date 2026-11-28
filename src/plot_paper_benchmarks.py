@@ -31,13 +31,15 @@ TXT_MAIN = "#f3f4f6"
 TXT_SUB = "#9ca3af"
 
 COL_VTQ = "#34d399"
+COL_VTQ1D = "#38bdf8"
 COL_EXL3 = "#fbbf24"
 COL_GGUF = "#f87171"
 
 SERIES_SPEC = [
-    ("VTQ (.vtq v2)", COL_VTQ, "o", ["VTQ:2.5", "VTQ:3.5", "VTQ:4.5", "VTQ:6.0"], 3),
-    ("EXL3 (mul1)", COL_EXL3, "s", ["EXL3:2.5", "EXL3:3.5", "EXL3:4.5", "EXL3:6.0"], 2),
-    ("GGUF (imatrix)", COL_GGUF, "D", ["GGUF:IQ2_S", "GGUF:IQ3_M", "GGUF:Q4_K_S", "GGUF:Q5_K_M", "GGUF:Q6_K"], 1),
+    ("VTQ (YAQA Sketch-A)", COL_VTQ, "o", "-", 2.4, 1.0, ["VTQ-SketchA:2.5", "VTQ-SketchA:3.5", "VTQ-SketchA:4.5", "VTQ-SketchA:6.0"], 4),
+    ("VTQ (1D fast)", COL_VTQ1D, "^", "--", 1.7, 0.85, ["VTQ:2.5", "VTQ:3.5", "VTQ:4.5", "VTQ:6.0"], 3),
+    ("EXL3 (mul1)", COL_EXL3, "s", "-", 2.2, 1.0, ["EXL3:2.5", "EXL3:3.5", "EXL3:4.5", "EXL3:6.0"], 2),
+    ("GGUF (imatrix)", COL_GGUF, "D", "-", 2.1, 1.0, ["GGUF:IQ2_S", "GGUF:IQ3_M", "GGUF:Q4_K_S", "GGUF:Q5_K_M", "GGUF:Q6_K"], 1),
 ]
 
 PANELS = [
@@ -69,7 +71,7 @@ def _apply_dark_rc():
 def render_pareto_charts(json_path: Path, fig_dir: Path, tag: str, title_model: str):
     _apply_dark_rc()
     ms = json.loads(json_path.read_text(encoding="utf-8"))["methods"]
-    all_bpws = [ms[k]["total_bpw"] for _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms]
+    all_bpws = [ms[k]["total_bpw"] for _, _, _, _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms]
     x_min = min(2.32, min(all_bpws) - 0.15)
     x_max = max(6.75, max(all_bpws) + 0.18)
 
@@ -77,33 +79,34 @@ def render_pareto_charts(json_path: Path, fig_dir: Path, tag: str, title_model: 
     fig, axes = plt.subplots(2, 3, figsize=(16.2, 8.6), dpi=160, sharex="col")
     fig.patch.set_facecolor(BG_OUTER)
     fig.suptitle(
-        f"{title_model} — End-to-End KLD & Perplexity vs Total BPW (Shared WikiText-2 Calibration)",
-        fontsize=13.5, fontweight="bold", color=TXT_MAIN, y=0.975,
+        f"{title_model} — End-to-End KLD & Perplexity vs Total BPW (VTQ YAQA Sketch-A vs 1D / EXL3 / GGUF)",
+        fontsize=13.2, fontweight="bold", color=TXT_MAIN, y=0.975,
     )
 
     for col, (ds_key, ds_title) in enumerate(PANELS):
         ax_k = axes[0, col]
         ax_k.set_yscale("log")
-        for label, color, marker, keys, zord in SERIES_SPEC:
+        for label, color, marker, ls, lw, alpha, keys, zord in SERIES_SPEC:
             pts = [(ms[k]["total_bpw"], ms[k][ds_key]["mean_kld"]) for k in keys if k in ms]
             if pts:
                 xs, ys = zip(*pts)
                 ax_k.plot(
-                    xs, ys, label=label, color=color, marker=marker, markersize=6.2,
-                    markeredgecolor=BG_OUTER, markeredgewidth=1.1, linewidth=2.3, zorder=zord + 2,
+                    xs, ys, label=label, color=color, marker=marker, linestyle=ls, alpha=alpha,
+                    markersize=6.0 if zord != 3 else 5.0,
+                    markeredgecolor=BG_OUTER, markeredgewidth=1.0, linewidth=lw, zorder=zord + 2,
                 )
         ax_k.set_title(ds_title, fontsize=11, fontweight="bold", color=TXT_MAIN, pad=7)
         if col == 0:
             ax_k.set_ylabel("Mean KLD vs BF16 (log, ↓ better)", fontsize=9.8, color=TXT_SUB)
-            leg = ax_k.legend(loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=9.2, labelcolor=TXT_MAIN)
+            leg = ax_k.legend(loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=8.8, labelcolor=TXT_MAIN)
             leg.set_zorder(10)
         ax_k.grid(True, which="major", linestyle="--", linewidth=0.7, color=GRID_COL, alpha=0.9)
         ax_k.grid(True, which="minor", linestyle=":", linewidth=0.5, color=GRID_COL, alpha=0.55)
         ax_k.set_xlim(x_min, x_max)
 
         ax_p = axes[1, col]
-        ref_ppl = next(ms[k][ds_key]["ppl_ref"] for _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms)
-        dppls = [ms[k][ds_key]["delta_ppl"] for _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms]
+        ref_ppl = next(ms[k][ds_key]["ppl_ref"] for _, _, _, _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms)
+        dppls = [ms[k][ds_key]["delta_ppl"] for _, _, _, _, _, _, keys, _ in SERIES_SPEC for k in keys if k in ms]
         all_pos = min(dppls) > 0.0015
         if all_pos:
             ax_p.set_yscale("log")
@@ -120,13 +123,14 @@ def render_pareto_charts(json_path: Path, fig_dir: Path, tag: str, title_model: 
             ax_p.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: "0" if abs(v) < 1e-9 else f"{v:+.2g}"))
             y_label = "ΔPerplexity = PPL_q − PPL_BF16 (0 = BF16)"
 
-        for label, color, marker, keys, zord in SERIES_SPEC:
+        for label, color, marker, ls, lw, alpha, keys, zord in SERIES_SPEC:
             pts = [(ms[k]["total_bpw"], ms[k][ds_key]["delta_ppl"]) for k in keys if k in ms]
             if pts:
                 xs, ys = zip(*pts)
                 ax_p.plot(
-                    xs, ys, label=label, color=color, marker=marker, markersize=6.2,
-                    markeredgecolor=BG_OUTER, markeredgewidth=1.1, linewidth=2.3, zorder=zord + 2,
+                    xs, ys, label=label, color=color, marker=marker, linestyle=ls, alpha=alpha,
+                    markersize=6.0 if zord != 3 else 5.0,
+                    markeredgecolor=BG_OUTER, markeredgewidth=1.0, linewidth=lw, zorder=zord + 2,
                 )
         ax_p.set_title(f"{ds_title} — ΔPPL (BF16 = {ref_ppl:.3f})", fontsize=10.5, fontweight="bold", color=TXT_MAIN, pad=7)
         if col == 0:
@@ -147,24 +151,25 @@ def render_pareto_charts(json_path: Path, fig_dir: Path, tag: str, title_model: 
     fig2, axes2 = plt.subplots(1, 3, figsize=(16.2, 4.7), dpi=160)
     fig2.patch.set_facecolor(BG_OUTER)
     fig2.suptitle(
-        f"{title_model} — End-to-End Mean KLD vs Total BPW (Shared WikiText-2 Calibration)",
-        fontsize=13.2, fontweight="bold", color=TXT_MAIN, y=0.97,
+        f"{title_model} — End-to-End Mean KLD vs Total BPW (VTQ YAQA Sketch-A vs 1D / EXL3 / GGUF)",
+        fontsize=12.9, fontweight="bold", color=TXT_MAIN, y=0.97,
     )
     for col, (ds_key, ds_title) in enumerate(PANELS):
         ax = axes2[col]
         ax.set_yscale("log")
-        for label, color, marker, keys, zord in SERIES_SPEC:
+        for label, color, marker, ls, lw, alpha, keys, zord in SERIES_SPEC:
             pts = [(ms[k]["total_bpw"], ms[k][ds_key]["mean_kld"]) for k in keys if k in ms]
             if pts:
                 xs, ys = zip(*pts)
                 ax.plot(
-                    xs, ys, label=label, color=color, marker=marker, markersize=6.2,
-                    markeredgecolor=BG_OUTER, markeredgewidth=1.1, linewidth=2.3, zorder=zord + 2,
+                    xs, ys, label=label, color=color, marker=marker, linestyle=ls, alpha=alpha,
+                    markersize=6.0 if zord != 3 else 5.0,
+                    markeredgecolor=BG_OUTER, markeredgewidth=1.0, linewidth=lw, zorder=zord + 2,
                 )
         ax.set_title(ds_title, fontsize=11, fontweight="bold", color=TXT_MAIN, pad=7)
         if col == 0:
             ax.set_ylabel("Mean KLD vs BF16 (log, ↓ better)", fontsize=9.8, color=TXT_SUB)
-            leg = ax.legend(loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=9.2, labelcolor=TXT_MAIN)
+            leg = ax.legend(loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=8.8, labelcolor=TXT_MAIN)
             leg.set_zorder(10)
         ax.set_xlabel("Total Model Bitrate (total_bpw)", fontsize=9.8, color=TXT_SUB)
         ax.xaxis.set_major_locator(mticker.MultipleLocator(0.5))
@@ -204,14 +209,25 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
     x = np.arange(len(bpw_targets))
     w = 0.255
 
+    def _vtq_prefix(d: dict) -> str:
+        ms = d["methods"]
+        return "VTQ-SketchA" if all(f"VTQ-SketchA:{b:.1f}" in ms for b in bpw_targets) else "VTQ"
+
+    def _vtq_prep_min(d: dict, pref: str) -> float:
+        base = float(d.get("vtq_shared_profile_fisher_sec", 0.0))
+        if pref == "VTQ-SketchA":
+            base += float(d.get("vtq_shared_sketch_a_sec", 0.0))
+        return base / 60.0
+
     # --- Top Row: Per-bitrate quantization time (minutes) + shared one-time calibration cap ---
     for col, (tag, full_nm, short_nm, d) in enumerate(loaded):
         ax = axes[0, col]
         ms = d["methods"]
-        vtq_prep_m = float(d.get("vtq_shared_profile_fisher_sec", 0.0)) / 60.0
+        pref = _vtq_prefix(d)
+        vtq_prep_m = _vtq_prep_min(d, pref)
         gguf_im_m = float(d.get("gguf_imatrix_sec", 0.0)) / 60.0
 
-        vtq_q = [ms[f"VTQ:{b:.1f}"]["quant_sec"] / 60.0 for b in bpw_targets]
+        vtq_q = [ms[f"{pref}:{b:.1f}"]["quant_sec"] / 60.0 for b in bpw_targets]
         exl_q = [ms[f"EXL3:{b:.1f}"]["quant_sec"] / 60.0 for b in bpw_targets]
         ggf_q = [ms[gguf_match[b]]["quant_sec"] / 60.0 for b in bpw_targets]
 
@@ -219,7 +235,7 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
         ax.bar(
             x - w, [vtq_prep_m] * 4, bottom=vtq_q, width=w,
             color=COL_VTQ, alpha=0.34, edgecolor=COL_VTQ, linewidth=0.8, hatch="///", zorder=3,
-            label="VTQ shared Fisher+profile (1×)",
+            label="VTQ shared Sketch-A + Fisher (1×)",
         )
 
         ax.bar(x, exl_q, width=w, color=COL_EXL3, edgecolor=BG_OUTER, linewidth=0.9, zorder=3, label="EXL3 convert.py")
@@ -231,7 +247,7 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
             label="GGUF shared imatrix (1×)",
         )
 
-        y_mult = 1.44 if col == 0 else 1.24
+        y_mult = 1.62 if col == 0 else 1.24
         y_top = max(max(exl_q), max(v + vtq_prep_m for v in vtq_q), max(g + gguf_im_m for g in ggf_q)) * y_mult
         ax.set_ylim(0, y_top)
 
@@ -255,13 +271,13 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
         if col == 0:
             ax.set_ylabel("Wall-Clock Time (minutes, ↓ faster)", fontsize=9.8, color=TXT_SUB)
             handles = [
-                mpatches.Patch(facecolor=COL_VTQ, edgecolor=BG_OUTER, label="VTQ (.vtq v2) quant"),
-                mpatches.Patch(facecolor=COL_VTQ, alpha=0.38, edgecolor=COL_VTQ, hatch="///", label="+ shared Fisher/profile (1×)"),
+                mpatches.Patch(facecolor=COL_VTQ, edgecolor=BG_OUTER, label="VTQ (YAQA Sketch-A) quant"),
+                mpatches.Patch(facecolor=COL_VTQ, alpha=0.38, edgecolor=COL_VTQ, hatch="///", label="+ shared Sketch-A & Fisher (1×)"),
                 mpatches.Patch(facecolor=COL_EXL3, edgecolor=BG_OUTER, label="EXL3 (mul1) convert.py"),
                 mpatches.Patch(facecolor=COL_GGUF, edgecolor=BG_OUTER, label="GGUF llama-quantize"),
                 mpatches.Patch(facecolor=COL_GGUF, alpha=0.38, edgecolor=COL_GGUF, hatch="///", label="+ shared llama-imatrix (1×)"),
             ]
-            leg = ax.legend(handles=handles, loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=8.0, labelcolor=TXT_MAIN)
+            leg = ax.legend(handles=handles, loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=7.8, labelcolor=TXT_MAIN)
             leg.set_zorder(10)
         ax.grid(True, axis="y", linestyle="--", linewidth=0.7, color=GRID_COL, alpha=0.9)
 
@@ -270,7 +286,8 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
     xm = np.arange(len(loaded))
     wm = 0.25
     vtq_suite = [
-        (float(d.get("vtq_shared_profile_fisher_sec", 0.0)) + sum(d["methods"][f"VTQ:{b:.1f}"]["quant_sec"] for b in bpw_targets)) / 60.0
+        _vtq_prep_min(d, _vtq_prefix(d))
+        + sum(d["methods"][f"{_vtq_prefix(d)}:{b:.1f}"]["quant_sec"] for b in bpw_targets) / 60.0
         for _, _, _, d in loaded
     ]
     exl_suite = [
@@ -302,7 +319,8 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
     model_mk = ["o", "s", "D"]
     for idx_m, (tag, full_nm, short_nm, d) in enumerate(loaded):
         ms = d["methods"]
-        sps_pure = [ms[f"EXL3:{b:.1f}"]["quant_sec"] / ms[f"VTQ:{b:.1f}"]["quant_sec"] for b in bpw_targets]
+        pref = _vtq_prefix(d)
+        sps_pure = [ms[f"EXL3:{b:.1f}"]["quant_sec"] / ms[f"{pref}:{b:.1f}"]["quant_sec"] for b in bpw_targets]
         ax_sp.plot(
             bpw_targets, sps_pure, label=short_nm, color=model_cols[idx_m], marker=model_mk[idx_m],
             markersize=6.5, markeredgecolor=BG_OUTER, markeredgewidth=1.1, linewidth=2.4, zorder=4,
@@ -313,23 +331,24 @@ def render_quant_time_chart(results_dir: Path, fig_dir: Path):
     ax_sp.set_xticklabels([f"{b:.1f}" for b in bpw_targets])
     ax_sp.set_xlabel("Target Bitrate (total_bpw)", fontsize=9.8, color=TXT_SUB)
     ax_sp.set_ylabel("Speedup = T_EXL3 / T_VTQ (× faster, ↑ better)", fontsize=9.6, color=TXT_SUB)
-    ax_sp.set_title("VTQ Quantization Speedup vs EXL3", fontsize=11, fontweight="bold", color=TXT_MAIN, pad=7)
+    ax_sp.set_title("VTQ (Sketch-A) Quantization Speedup vs EXL3", fontsize=11, fontweight="bold", color=TXT_MAIN, pad=7)
     leg_sp = ax_sp.legend(loc="upper right", frameon=True, facecolor="#12151e", edgecolor=SPINE_COL, fontsize=8.8, labelcolor=TXT_MAIN)
     leg_sp.set_zorder(10)
     ax_sp.grid(True, linestyle="--", linewidth=0.7, color=GRID_COL, alpha=0.9)
 
-    # --- Bottom-Right (2): Quality vs Quantization Time @ 2.5 & 3.5 bpw (3-Trace Mean KLD vs Standalone Time) ---
+    # --- Bottom-Right (2): Quality vs Quantization Time @ 2.5..6.0 bpw (3-Trace Mean KLD vs Standalone Time) ---
     ax_qt = axes[1, 2]
     ax_qt.set_yscale("log")
     # Plot Qwen3.6-35B and Gemma-4-26B (solid vs dashed) across the 4 bitrates as Time vs Mean KLD!
     for _, full_nm, short_nm, d in loaded[1:]:
         ms = d["methods"]
+        pref = _vtq_prefix(d)
         ls = "-" if "Qwen" in short_nm else "--"
         al = 1.0 if "Qwen" in short_nm else 0.72
-        vtq_p = float(d.get("vtq_shared_profile_fisher_sec", 0.0)) / 60.0
+        vtq_p = _vtq_prep_min(d, pref)
         ggf_p = float(d.get("gguf_imatrix_sec", 0.0)) / 60.0
         for fmt_lbl, col_c, mk_c, keys_l, add_p in [
-            ("VTQ", COL_VTQ, "o", ["VTQ:2.5", "VTQ:3.5", "VTQ:4.5", "VTQ:6.0"], vtq_p),
+            ("VTQ", COL_VTQ, "o", [f"{pref}:2.5", f"{pref}:3.5", f"{pref}:4.5", f"{pref}:6.0"], vtq_p),
             ("EXL3", COL_EXL3, "s", ["EXL3:2.5", "EXL3:3.5", "EXL3:4.5", "EXL3:6.0"], 0.0),
             ("GGUF", COL_GGUF, "D", ["GGUF:IQ2_S", "GGUF:IQ3_M", "GGUF:Q4_K_S", "GGUF:Q6_K"], ggf_p),
         ]:

@@ -41,9 +41,15 @@ where:
 
 ### 3.1. Intra-Subblock Tail-Biting Trellis
 
-Coded bits are stored as `uint8_t c[16][16][2]`; `c[g][r][0]` holds columns `0..7` (MSB-first) and `c[g][r][1]` holds columns `8..15` of row `r` in subgroup `g` (in the CPU kernel, byte order within each pair is arranged for single-instruction little-endian `uint16_t` windowing).
+Coded bits are stored as a native little-endian `uint16_t` pair `uint8_t c[16][16][2]`:
+- `c[g][r][0]` (low byte of `w = (c[g][r][1] << 8) | c[g][r][0]`) holds columns `8..15` (MSB-first: bit `7` = col `8`, …, bit `0` = col `15`),
+- `c[g][r][1]` (high byte of `w`) holds columns `0..7` (MSB-first: bit `7` = col `0`, …, bit `0` = col `7`).
 
-The trellis for subgroup `g` traverses **all 16 rows sequentially** (`256` steps: `(r=0, j=0..15), (r=1, j=0..15), …, (r=15, j=0..15)`) and wraps around: the initial 9-bit history of row `0` comes from the final 9 coded bits of row `15` in the same subgroup `g`. Thus, the 16 subgroups of a super-tile form 16 independent trellises, requiring zero cross-thread state communication between rows on GPU.
+In this layout, the little-endian 16-bit word `w = *(uint16_t*)c[g][r]` contains all 16 coded bits of row `r` in natural MSB-to-LSB column order (`bit 15` = col `0`, …, `bit 0` = col `15`), enabling single-instruction `uint16_t` windowing on x86-64/GPU without byte-swaps.
+
+The trellis for subgroup `g` traverses **all 16 rows sequentially** (`256` steps: `(r=0, j=0..15), (r=1, j=0..15), …, (r=15, j=0..15)`) and wraps around: the initial 9-bit history of row `r` comes from the **low 9 bits** of the previous row's LE word (`w_prev & 0x1FF == ((c[g][r_prev][1] & 1) << 8) | c[g][r_prev][0]`, i.e. columns `7..15` of row `r - 1`, wrapping from row `15` for `r = 0`). Thus, the 16 subgroups of a super-tile form 16 independent trellises, requiring zero cross-thread state communication between rows on GPU.
+
+> **Verification vector:** if row `15` stores bytes `c[g][15] = {0xA6, 0x01}` (`w_15 = 0x01A6`, initial 9-bit history `h = w_15 & 0x1FF = 0x1A6`) and row `0` stores `c[g][0] = {0xE1, 0x80}` (`w_0 = 0x80E1`), then the 10-bit states `s = ((s << 1) | c_j) & 0x3FF` at columns `j = 0, 7, 8, 15` of row `0` are **`0x34D`, `0x280`, `0x101`, `0x0E1`**.
 
 At each step, a 10-bit state $s = (h \ll 1) \mid c_j$ determines the subset label via $\mathrm{GF}(2)$ parity masks:
 
@@ -187,12 +193,13 @@ The `source_metadata(model_dir)` helper in `src/vtq_format.py` bundles `config.j
 ## 7. VTQ Encoder & Resource Usage
 
 1. **`Block16-LDLQ` over Intra-Subblock Trellises** (`ldlq_block256_cuda` in [`src/cuda/tcq_viterbi.cu`](../../src/cuda/tcq_viterbi.cu)): 16 causal Cholesky feedback stages per `256`-column block, 2-pass tail-biting Viterbi (`1,024` states, radix-4, `__ballot_sync`), and joint `(gain, state)` search with `n_cand = 4` when `2^h > 4`.
-2. **Scales**: `d_row` is pre-centered so the row maximum of `u_sb` lands near `224` (`0` saturations at `255`), followed by monotonic Cholesky-weighted `u_sb` refinement.
-3. **Global Refit**: closed-form `(c_row → fp16 d_row, fp16 suh)` pass under the full Hessian (`VTQ_REFIT_SWEEPS=1` by default).
-4. **`VTQ_GS_SWEEPS`** (default `0`): optional Gauss–Seidel sweep with residual Viterbi (`1`) or full `LDLQ` re-encoding (`2`).
-5. **`quantize_rings_vtq`** (embeddings, `lm_head`, `Gemma 4` PLE): 1D tail-biting Viterbi over rings of length `128 / 160 / 256` without zero-padding.
-6. **`polish_model_scales_kld_checkpointed`**: checkpointed end-to-end `(d_row, suh)` optimization under teacher-forced KL divergence (`0` extra bits).
-7. **Codebook Training** (`python -m src.vtq --train-tables`, `~2 min` on `RTX 5070 Ti`): joint trellis Lloyd–Max over `(tab, gain_u8)`, coordinate search `gain_u8 ± 1, 2`, and `distortion_ratio` calibration on `Llama-3.2-3B-Instruct`.
+2. **YAQA `Sketch-A` Two-Sided GPTQ-2D & KL-Blended `H_in` Solver (Default)** ([`src/build_yaqa_sketch_a.py`](../../src/build_yaqa_sketch_a.py), [`src/vtq_gptq2d.py`](../../src/vtq_gptq2d.py)): a single reusable streaming forward+backward pass (`256 × 512` open multi-domain sequences with automatic turn/BOS calibration prefix resolution and per-sequence trace normalization) builds both Kronecker factors — output Hessians `G_out` for the 5 compact targets (`q_proj`, `k_proj`, `v_proj`, `o_proj`/`out_proj`, `down_proj`, `shared_expert.down_proj`, and layer-shared `moe_down`) and KL-weighted input Hessians `H_in` for all dense projections plus `moe_gu` and per-expert `moe_down`. During quantization, `OutHessianProvider` (`sigma_reg = 0.10`) propagates rounding error across both input columns (`U_H`) and output rows (`L_G`) over native `16×16` trellis super-entries (including batched `B=32` MoE `down_proj`), while `InHessianProvider` blends `0.50 · norm(H_in) + 0.50 · norm(H_stream)`. Because optimization is 100% offline, `.vtq` v2 bitstreams, `total_bpw`, and Velri decode kernels remain completely unchanged (an informational `"quant_solver": "vtq-sketcha-2d"` field is recorded in the JSON footer; pass `--fast-1d` in `run_paper_benchmarks.py` to opt out to legacy 1D quantization).
+3. **Scales**: `d_row` is pre-centered so the row maximum of `u_sb` lands near `224` (`0` saturations at `255`), followed by monotonic Cholesky-weighted `u_sb` refinement.
+4. **Global Refit**: closed-form `(c_row → fp16 d_row, fp16 suh)` pass under the full Hessian (`VTQ_REFIT_SWEEPS=1` by default).
+5. **`VTQ_GS_SWEEPS`** (default `0`): optional Gauss–Seidel sweep with residual Viterbi (`1`) or full `LDLQ` re-encoding (`2`).
+6. **`quantize_rings_vtq`** (embeddings, `lm_head`, `Gemma 4` PLE): 1D tail-biting Viterbi over rings of length `128 / 160 / 256` without zero-padding.
+7. **`polish_model_scales_kld_checkpointed`**: checkpointed end-to-end `(d_row, suh)` optimization under teacher-forced KL divergence (`0` extra bits).
+8. **Codebook Training** (`python -m src.vtq --train-tables`, `~2 min` on `RTX 5070 Ti`): joint trellis Lloyd–Max over `(tab, gain_u8)`, coordinate search `gain_u8 ± 1, 2`, and `distortion_ratio` calibration on `Llama-3.2-3B-Instruct`.
 
 ### 7.1. Full-Model Quantization Wall-Time (`quant_sec`) & Per-Matrix Peak VRAM (`RTX PRO 6000 Blackwell`)
 

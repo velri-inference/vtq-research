@@ -1097,10 +1097,13 @@ def quantize_and_export_vtq_full(
                     W = ex_obj.gate_up_proj.data[e]
                     rw = fisher[(l_idx, full_nm)].to(dev)
                     row_sl = assignment[(l_idx, full_nm)]
+                    H_use = hin_provider.blend_with(l_idx, full_nm, W.shape[1], dev, He) if hin_provider is not None else He
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, He, row_sl, seed=sqm._seed(l_idx, f"gu{e}"), damp=0.20, row_weights=rw, rot_block=-1
+                        W, H_use, row_sl, seed=sqm._seed(l_idx, f"gu{e}"), damp=0.20, row_weights=rw, rot_block=-1
                     )
+                    if H_use is not He:
+                        del H_use
                     wr.add_matrix(f"{lay_pfx}.{full_nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     ex_obj.gate_up_proj.data[e].copy_(w_hat.to(W.dtype))
@@ -1115,17 +1118,24 @@ def quantize_and_export_vtq_full(
 
                 def _q_dn(e, He):
                     nonlocal lin_bytes_sum
-                    if G_moe_factors is not None:
-                        pending_dn.append((e, He))
-                        return
                     full_nm = f"{ex_pfx}.{e}.down_proj"
+                    H_use = (
+                        hin_provider.blend_with(l_idx, full_nm, ex_obj.down_proj.shape[2], dev, He)
+                        if hin_provider is not None
+                        else He
+                    )
+                    if G_moe_factors is not None:
+                        pending_dn.append((e, H_use))
+                        return
                     W = ex_obj.down_proj.data[e]
                     rw = fisher[(l_idx, full_nm)].to(dev)
                     row_sl = assignment[(l_idx, full_nm)]
                     pos_before = wr.pos
                     _, w_hat, _ = vtq.quantize_matrix_vtq(
-                        W, He, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1,
+                        W, H_use, row_sl, seed=sqm._seed(l_idx, f"dn{e}"), damp=0.30, row_weights=rw, rot_block=-1,
                     )
+                    if H_use is not He:
+                        del H_use
                     wr.add_matrix(f"{lay_pfx}.{full_nm}", vtq.PACK.pop("matrix"), verify=False)
                     lin_bytes_sum += (wr.pos - pos_before)
                     ex_obj.down_proj.data[e].copy_(w_hat.to(W.dtype))
@@ -1218,6 +1228,15 @@ def quantize_and_export_vtq_full(
                 continue
             wr.add_tensor(k, ev.store.get(k, "cpu"))
 
+        if g_provider is not None and hin_provider is not None:
+            quant_solver = "vtq-sketcha-2d"
+        elif g_provider is not None:
+            quant_solver = "vtq-gptq2d"
+        elif hin_provider is not None:
+            quant_solver = "vtq-hin"
+        else:
+            quant_solver = "vtq-1d"
+
         meta = vf.source_metadata(ev.model_dir)
         meta["quantization"] = {
             "formats": [vf.format_json_vtq(f) for f in all_fmts],
@@ -1225,6 +1244,7 @@ def quantize_and_export_vtq_full(
             "embed_spec": emb_spec,
             "head_spec": "tied" if ev.tie_word_embeddings else head_spec,
             "rot_block": -1,
+            "quant_solver": quant_solver,
         }
         wr.finalize(meta)
         with open(out_vtq_path, "rb") as fs:
@@ -1246,6 +1266,7 @@ def quantize_and_export_vtq_full(
         "sha256": sha256,
         "embed_spec": emb_spec,
         "head_spec": "tied" if ev.tie_word_embeddings else head_spec,
+        "quant_solver": quant_solver,
     }
 
 
@@ -2071,24 +2092,33 @@ def compute_summary_comparisons(results: dict):
     comps = {}
     ms = results.get("methods", {})
     gguf_match = {2.5: "GGUF:IQ2_S", 3.5: "GGUF:IQ3_M", 4.5: "GGUF:Q4_K_S", 6.0: "GGUF:Q6_K"}
+
+    def _add_pair(ak: str, bk: str):
+        if ak not in ms or bk not in ms:
+            return
+        pair_d = {}
+        for ds in ("nemotron", "multilingual", "wikitext2"):
+            if ds in ms[ak] and ds in ms[bk]:
+                d = paired_bootstrap_diff(ms[ak][ds], ms[bk][ds])
+                d["rel_pct"] = round(100.0 * d["mean_diff"] / max(float(ms[bk][ds]["mean_kld"]), 1e-12), 2)
+                dppl = paired_bootstrap_ppl_diff(ms[ak][ds], ms[bk][ds])
+                d["ppl_diff"] = round(float(dppl["mean_diff"]), 5)
+                d["ppl_ci95_lo"] = round(float(dppl["ci95_lo"]), 5)
+                d["ppl_ci95_hi"] = round(float(dppl["ci95_hi"]), 5)
+                d["p_vtq_ppl_better"] = round(float(dppl["frac_a_better"]), 4)
+                pair_d[ds] = d
+        comps[f"{ak} ({ms[ak]['total_bpw']:.3f}) vs {bk} ({ms[bk]['total_bpw']:.3f})"] = pair_d
+
     for b in TARGET_BPWS:
-        vk = f"VTQ:{b:.1f}"
-        if vk not in ms:
-            continue
-        for rk in (f"EXL3:{b:.1f}", gguf_match[b], "GGUF:Q5_K_M" if b == 6.0 else None):
-            if rk and rk in ms:
-                pair_d = {}
-                for ds in ("nemotron", "multilingual", "wikitext2"):
-                    if ds in ms[vk] and ds in ms[rk]:
-                        d = paired_bootstrap_diff(ms[vk][ds], ms[rk][ds])
-                        d["rel_pct"] = round(100.0 * d["mean_diff"] / max(float(ms[rk][ds]["mean_kld"]), 1e-12), 2)
-                        dppl = paired_bootstrap_ppl_diff(ms[vk][ds], ms[rk][ds])
-                        d["ppl_diff"] = round(float(dppl["mean_diff"]), 5)
-                        d["ppl_ci95_lo"] = round(float(dppl["ci95_lo"]), 5)
-                        d["ppl_ci95_hi"] = round(float(dppl["ci95_hi"]), 5)
-                        d["p_vtq_ppl_better"] = round(float(dppl["frac_a_better"]), 4)
-                        pair_d[ds] = d
-                comps[f"{vk} ({ms[vk]['total_bpw']:.3f}) vs {rk} ({ms[rk]['total_bpw']:.3f})"] = pair_d
+        refs = [f"EXL3:{b:.1f}", gguf_match[b]]
+        if b == 6.0:
+            refs.append("GGUF:Q5_K_M")
+        for vk in (f"VTQ-SketchA:{b:.1f}", f"VTQ:{b:.1f}"):
+            if vk not in ms:
+                continue
+            for rk in refs:
+                _add_pair(vk, rk)
+        _add_pair(f"VTQ-SketchA:{b:.1f}", f"VTQ:{b:.1f}")
     results["comparisons"] = comps
 
 
@@ -2102,13 +2132,17 @@ def main():
     ap.add_argument("--phases", nargs="+", choices=["vtq", "gguf", "exl3"], default=["vtq", "gguf", "exl3"])
     ap.add_argument("--target-bpws", nargs="+", type=float, default=None)
     ap.add_argument("--download-model", action="store_true", help="Automatically download the HF BF16 checkpoint if missing.")
-    ap.add_argument("--gptq2d", action="store_true", help="Opt-in: enable two-sided GPTQ-2D rounding on o_proj + down_proj (experimental).")
-    ap.add_argument("--gptq2d-5out", action="store_true", help="Expand --gptq2d targets to all 5 compact outputs (q, k, v, o, down + MoE).")
+    ap.add_argument("--fast-1d", "--no-yaqa", dest="fast_1d", action="store_true", help="Opt-out of default YAQA Sketch-A (5-out GPTQ-2D + H_in blend) and run legacy 1D VTQ.")
+    ap.add_argument("--sketch-a-seqs", type=int, default=256, help="Number of multi-domain sequences for auto-built YAQA Sketch-A Hessians (default: 256).")
+    ap.add_argument("--sketch-a-seq-len", type=int, default=512, help="Sequence length for auto-built YAQA Sketch-A Hessians (default: 512).")
+    ap.add_argument("--gptq2d", action="store_true", help="Explicit override: enable two-sided GPTQ-2D rounding using --gptq2d-hess.")
+    ap.add_argument("--gptq2d-5out", action="store_true", help="Expand explicit --gptq2d targets to all 5 compact outputs (q, k, v, o, down + MoE).")
     ap.add_argument("--gptq2d-hess", type=str, default=None, help="Local dir or HF repo id of 2-sided output Hessians (*_hout.pt) for --gptq2d.")
-    ap.add_argument("--gptq2d-sigma", type=float, default=0.10, help="Output Hessian ridge damping sigma_reg for --gptq2d (default: 0.10).")
-    ap.add_argument("--yaqa-hin", type=str, default=None, help="Opt-in: local dir or HF repo id of KL-weighted input Hessians (*_hin.pt).")
-    ap.add_argument("--yaqa-hin-blend", type=float, default=0.50, help="Blend weight for --yaqa-hin with H_stream (default: 0.50).")
-    ap.add_argument("--method-tag", type=str, default=None, help="Optional method key prefix in output JSON (e.g. VTQ-SketchA, VTQ-YAQA).")
+    ap.add_argument("--gptq2d-sigma", type=float, default=0.10, help="Output Hessian ridge damping sigma_reg for GPTQ-2D (default: 0.10).")
+    ap.add_argument("--yaqa-hin", type=str, default=None, help="Explicit override: local dir or HF repo id of KL-weighted input Hessians (*_hin.pt).")
+    ap.add_argument("--yaqa-hin-blend", type=float, default=0.50, help="Blend weight for YAQA H_in with H_stream (default: 0.50).")
+    ap.add_argument("--yaqa-moe-hin-blend", type=float, default=None, help="Optional separate blend weight for MoE expert H_in (defaults to --yaqa-hin-blend).")
+    ap.add_argument("--method-tag", type=str, default=None, help="Optional method key prefix in output JSON (defaults to VTQ-SketchA for default YAQA, VTQ for --fast-1d).")
     args = ap.parse_args()
     if args.target_bpws:
         global TARGET_BPWS
@@ -2172,33 +2206,75 @@ def main():
             codec = build_vtq_native_codec(args.work_dir)
             g_provider = None
             hin_provider = None
-            if args.gptq2d:
-                if not args.gptq2d_hess:
-                    raise ValueError("--gptq2d requires --gptq2d-hess <local_dir_or_hf_repo>")
-                from src.vtq_gptq2d import (
-                    DEFAULT_GPTQ2D_TARGETS,
-                    FIVE_OUT_GPTQ2D_TARGETS,
-                    OutHessianProvider,
-                )
+            method_tag = args.method_tag
+            explicit_yaqa = bool(args.gptq2d or args.yaqa_hin)
+            if not args.fast_1d and not explicit_yaqa:
+                # Default upstream VTQ solver: single-pass YAQA Sketch-A (5-out GPTQ-2D + 0.50 H_in blend)
+                method_tag = method_tag or "VTQ-SketchA"
+                if any(f"{method_tag}:{b:.1f}" not in results["methods"] for b in TARGET_BPWS):
+                    import src.build_sketch_b_hessians as sb
+                    import src.build_yaqa_sketch_a as sa
+                    from src.vtq_gptq2d import (
+                        FIVE_OUT_GPTQ2D_TARGETS,
+                        InHessianProvider,
+                        OutHessianProvider,
+                    )
 
-                g_provider = OutHessianProvider(
-                    args.gptq2d_hess,
-                    targets=(FIVE_OUT_GPTQ2D_TARGETS if args.gptq2d_5out else DEFAULT_GPTQ2D_TARGETS),
-                    sigma_reg=args.gptq2d_sigma,
-                    cache_dir=m_work / "gptq2d_hess",
-                )
-            if args.yaqa_hin:
-                from src.vtq_gptq2d import InHessianProvider
+                    sketch_dir = m_work / "sketch_a_hess"
+                    cal_sa_path = m_work / f"sketch_a_multidomain_{args.sketch_a_seqs}x{args.sketch_a_seq_len}.safetensors"
+                    sa_ids, _ = sb.build_multidomain_sketch_cal(
+                        model_dir, cal_sa_path, n_seqs=args.sketch_a_seqs, seq_len=args.sketch_a_seq_len
+                    )
+                    sa_meta = sa.build_streaming_sketch_a_hessians(
+                        ev,
+                        sa_ids,
+                        sketch_dir,
+                        trace_norm=True,
+                        gout_mode="sketch-a",
+                    )
+                    if "vtq_shared_sketch_a_sec" not in results:
+                        results["vtq_shared_sketch_a_sec"] = sa_meta.get("wall_sec")
+                    g_provider = OutHessianProvider(
+                        sketch_dir,
+                        targets=FIVE_OUT_GPTQ2D_TARGETS,
+                        sigma_reg=args.gptq2d_sigma,
+                        cache_dir=sketch_dir,
+                    )
+                    hin_provider = InHessianProvider(
+                        sketch_dir,
+                        blend=args.yaqa_hin_blend,
+                        moe_blend=args.yaqa_moe_hin_blend,
+                        cache_dir=sketch_dir,
+                    )
+            else:
+                if args.gptq2d:
+                    if not args.gptq2d_hess:
+                        raise ValueError("--gptq2d requires --gptq2d-hess <local_dir_or_hf_repo>")
+                    from src.vtq_gptq2d import (
+                        DEFAULT_GPTQ2D_TARGETS,
+                        FIVE_OUT_GPTQ2D_TARGETS,
+                        OutHessianProvider,
+                    )
 
-                hin_provider = InHessianProvider(
-                    args.yaqa_hin,
-                    blend=args.yaqa_hin_blend,
-                    cache_dir=m_work / "yaqa_hin",
-                )
+                    g_provider = OutHessianProvider(
+                        args.gptq2d_hess,
+                        targets=(FIVE_OUT_GPTQ2D_TARGETS if args.gptq2d_5out else DEFAULT_GPTQ2D_TARGETS),
+                        sigma_reg=args.gptq2d_sigma,
+                        cache_dir=m_work / "gptq2d_hess",
+                    )
+                if args.yaqa_hin:
+                    from src.vtq_gptq2d import InHessianProvider
+
+                    hin_provider = InHessianProvider(
+                        args.yaqa_hin,
+                        blend=args.yaqa_hin_blend,
+                        moe_blend=args.yaqa_moe_hin_blend,
+                        cache_dir=m_work / "yaqa_hin",
+                    )
             run_vtq_phase(
                 ev, cal_ids, m_work / "fisher_neutral.pt", m_work / "vtq_profile.pt",
                 codec, traces, ref_final, results, out_json, m_work,
-                g_provider=g_provider, hin_provider=hin_provider, method_tag=args.method_tag,
+                g_provider=g_provider, hin_provider=hin_provider, method_tag=method_tag,
             )
         elif ph == "gguf":
             shim = LibGgmlShim(args.llama_cpp_dir, args.work_dir)

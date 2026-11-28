@@ -66,6 +66,36 @@ class TestVtqGptq2d(unittest.TestCase):
             self.assertTrue(torch.allclose(got.float(), M, atol=1e-6))
             self.assertIsNone(prov.get(3, "mlp.gate_proj", 64, self.dev))
 
+            # 5-out targets include q/k/v/o/down/MoE
+            prov5 = vg.OutHessianProvider(td_p, targets=vg.FIVE_OUT_GPTQ2D_TARGETS, sigma_reg=0.10)
+            for nm in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.down_proj", "experts.7.down_proj"):
+                self.assertTrue(prov5.wants(nm), f"Expected 5-out target {nm}")
+            self.assertFalse(prov5.wants("mlp.up_proj"))
+
+            # InHessianProvider: dense + layer-shared moe_gu + per-expert stacked moe_down + dead-expert fallback
+            torch.save(flat.cpu(), td_p / "3_q_hin.pt")
+            torch.save(flat.cpu(), td_p / "3_moe_gu_hin.pt")
+            zero_flat = torch.zeros_like(flat.cpu())
+            moe_stack = torch.stack([flat.cpu(), zero_flat], dim=0)  # expert 0 live, expert 1 dead
+            torch.save(moe_stack, td_p / "3_moe_down_hin.pt")
+
+            h_stream = torch.eye(64, device=self.dev) * 3.0
+            hin_p = vg.InHessianProvider(td_p, blend=0.50, moe_blend=0.25)
+            hb_q = hin_p.blend_with(3, "self_attn.q_proj", 64, self.dev, h_stream)
+            self.assertAlmostEqual(float(hb_q.diagonal().mean().item()), 1.0, places=5)
+            self.assertGreater(float((hb_q - torch.eye(64, device=self.dev)).abs().max().item()), 1e-3)
+
+            hb_gu = hin_p.blend_with(3, "experts.0.gate_up_proj", 64, self.dev, h_stream)
+            self.assertAlmostEqual(float(hb_gu.diagonal().mean().item()), 1.0, places=5)
+
+            hb_dn0 = hin_p.blend_with(3, "experts.0.down_proj", 64, self.dev, h_stream)
+            self.assertAlmostEqual(float(hb_dn0.diagonal().mean().item()), 1.0, places=5)
+            self.assertGreater(float((hb_dn0 - torch.eye(64, device=self.dev)).abs().max().item()), 1e-3)
+
+            # Dead expert (expert 1 = all zeros) must cleanly fall back to H_stream!
+            hb_dn1 = hin_p.blend_with(3, "experts.1.down_proj", 64, self.dev, h_stream)
+            self.assertTrue(torch.equal(hb_dn1, h_stream))
+
     def test_ldl_of_inverse_exact(self):
         M = _make_correlated_gram(128, seed=11, device=self.dev)
         L, prec, scalar_dw = vg.ldl_of_inverse_block(M, size=16, use_fp64=True)

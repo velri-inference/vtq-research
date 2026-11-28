@@ -426,7 +426,7 @@ def _unpack_lsb16(buf: np.ndarray, off: int, frac: int, nbg: int, nsb: int) -> t
 
 
 def pack_supertiles_vtq(
-    c_all: np.ndarray,    # uint8 [M, nsb, 16, 2] (MSB-first coded byte per g=0..15, [0]=cols 0..7, [1]=cols 8..15)
+    c_all: np.ndarray,    # uint8 [M, nsb, 16, 2] (LE uint16 pair per g=0..15, MSB-first per byte: [0]=cols 8..15, [1]=cols 0..7)
     u_all: np.ndarray,    # uint8 [M, nsb, 256] (natural column order 0..255)
     g_sub: np.ndarray,    # uint8 [M, nsb, 16] (gain index per g=0..15)
     u_sb: np.ndarray,     # uint8 [M, nsb] (linear superblock scale 0..255)

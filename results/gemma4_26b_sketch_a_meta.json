@@ -1,0 +1,138 @@
+{
+  "model_dir": "/content/work/models/gemma-4-26B-A4B-it",
+  "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "n_seqs": 256,
+  "seq_len": 512,
+  "batch_size": 4,
+  "chunk_seqs": 128,
+  "save_hin": true,
+  "include_moe": true,
+  "save_moe_dn_hin": true,
+  "dead_moe_experts": 17,
+  "trace_norm": true,
+  "gout_mode": "sketch-a",
+  "prefix_ids": [
+    2,
+    105,
+    4368,
+    107,
+    100,
+    45518,
+    107,
+    101
+  ],
+  "wall_sec": 540.98,
+  "eff_rank_hout": {
+    "down": {
+      "count": 30,
+      "mean_eff_rank": 167.6,
+      "min": 26.7,
+      "max": 390.3
+    },
+    "k": {
+      "count": 30,
+      "mean_eff_rank": 39.5,
+      "min": 18.9,
+      "max": 121.8
+    },
+    "moe_down": {
+      "count": 30,
+      "mean_eff_rank": 1043.6,
+      "min": 415.3,
+      "max": 1363.7
+    },
+    "o": {
+      "count": 30,
+      "mean_eff_rank": 621.2,
+      "min": 87.1,
+      "max": 1154.8
+    },
+    "q": {
+      "count": 30,
+      "mean_eff_rank": 55.8,
+      "min": 5.3,
+      "max": 128.9
+    },
+    "v": {
+      "count": 25,
+      "mean_eff_rank": 475.2,
+      "min": 178.4,
+      "max": 694.9
+    }
+  },
+  "eff_rank_hin": {
+    "down": {
+      "count": 30,
+      "mean_eff_rank": 26.1,
+      "min": 2.2,
+      "max": 115.1
+    },
+    "gate": {
+      "count": 30,
+      "mean_eff_rank": 10.3,
+      "min": 2.1,
+      "max": 26.5
+    },
+    "k": {
+      "count": 30,
+      "mean_eff_rank": 4.8,
+      "min": 1.5,
+      "max": 21.7
+    },
+    "moe_gu": {
+      "count": 30,
+      "mean_eff_rank": 135.4,
+      "min": 6.3,
+      "max": 473.1
+    },
+    "o": {
+      "count": 30,
+      "mean_eff_rank": 5.5,
+      "min": 1.7,
+      "max": 19.4
+    },
+    "q": {
+      "count": 30,
+      "mean_eff_rank": 10.8,
+      "min": 1.5,
+      "max": 26.4
+    },
+    "up": {
+      "count": 30,
+      "mean_eff_rank": 10.7,
+      "min": 1.9,
+      "max": 26.2
+    },
+    "v": {
+      "count": 25,
+      "mean_eff_rank": 5.7,
+      "min": 2.1,
+      "max": 21.6
+    },
+    "moe_down": {
+      "count": 3823,
+      "mean_eff_rank": 41.4,
+      "min": 1.0,
+      "max": 215.5
+    }
+  },
+  "calibration": {
+    "n_seqs": 256,
+    "seq_len": 512,
+    "total_tokens": 131072,
+    "seed": 20261125,
+    "provenance": {
+      "HuggingFaceFW/fineweb-edu:sample-10BT": 128,
+      "HuggingFaceFW/fineweb-2:rus_Cyrl": 10,
+      "HuggingFaceFW/fineweb-2:cmn_Hani": 10,
+      "HuggingFaceFW/fineweb-2:deu_Latn": 10,
+      "HuggingFaceFW/fineweb-2:fra_Latn": 10,
+      "HuggingFaceFW/fineweb-2:spa_Latn": 10,
+      "HuggingFaceFW/fineweb-2:jpn_Jpan": 10,
+      "HuggingFaceFW/fineweb-2:kor_Hang": 10,
+      "HuggingFaceFW/fineweb-2:arb_Arab": 10,
+      "HuggingFaceFW/fineweb-edu:sample-10BT_code": 48
+    },
+    "build_sec": 399.95
+  }
+}

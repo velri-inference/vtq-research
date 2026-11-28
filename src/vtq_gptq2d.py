@@ -1,21 +1,17 @@
 """
-Opt-in Two-Sided GPTQ-2D Rounding Engine for VTQ (`src/vtq_gptq2d.py`).
+Two-Sided GPTQ-2D & YAQA Sketch-A Hessian Solver for VTQ (`src/vtq_gptq2d.py`).
 
 Propagates quantization rounding error across BOTH input columns (`U_H`) and output rows (`L_G`)
-over VTQ's native `16x16` intra-subblock tail-biting trellis super-entries with ZERO changes
-to the `.vtq` file format or inference kernels.
+over VTQ's native `16x16` intra-subblock tail-biting trellis super-entries, and blends per-layer
+KL-weighted input Hessians (`H_in`) with the live quantized-stream activation covariance (`H_stream`),
+with ZERO changes to the `.vtq` v2 binary container or inference kernels.
 
 Based on:
   - GPTQ-2D: Cubic-Time Two-Sided Adaptive Rounding (arXiv:2607.27042v2),
     vendored MIT engine in `src/third_party_gptq2d.py`.
-  - YAQA Sketch-B Kronecker output Hessian format (`flatH` lower-triangular `.pt` files).
-
-Empirically validated in `exp32` (`results/exp32_gptq2d_8b_ab.json`) on Llama-3.1-8B-Instruct
-(`VTQ_200`, 32 layers + streaming GPTAQ, applying GPTQ-2D only to the 64 `o_proj + down_proj`
-matrices with `sigma_reg = 0.10`):
-  - vs matched `static_1d`: `-2.60%*` WikiText-2, `-5.01%*` Nemotron, `-4.39%*` Multilingual KLD
-  - vs prod `vtq_prod`:     `-2.07%`  WikiText-2, `-5.67%*` Nemotron, `-7.16%*` Multilingual KLD
-  - 2.2x faster on `o_proj + down_proj` than prod VTQ (`53.8s` vs `120.9s` on L4).
+  - YAQA Kronecker Hessians (`src/build_yaqa_sketch_a.py`, `flatH` lower-triangular `.pt` files):
+    `OutHessianProvider` (`FIVE_OUT_GPTQ2D_TARGETS`, `sigma_reg = 0.10`) +
+    `InHessianProvider` (`blend = 0.50`, including layer-shared `moe_gu` & per-expert `moe_down`).
 """
 
 from __future__ import annotations
@@ -36,6 +32,7 @@ from src.tcq_proto import viterbi_ub_cuda
 from src.vtq_format import SUPER_ROWS, TILE, U_SB_UNIT
 
 DEFAULT_GPTQ2D_SIGMA_REG = 0.10
+DEFAULT_GPTQ2D_MAX_L_ABS: Optional[float] = None
 DEFAULT_GPTQ2D_TARGETS: Tuple[str, ...] = (
     "self_attn.o_proj",
     "linear_attn.out_proj",
@@ -71,6 +68,18 @@ _SUBNAME_TO_YAQA_SHORT = {
 # 1. Symmetric Packing, Padding, Regularization, and Exact Block-LDL-of-Inverse
 # =================================================================================================
 
+_TRIL_CACHE: Dict[Tuple[int, str], torch.Tensor] = {}
+
+
+def _get_tril_indices(n: int, device: torch.device) -> torch.Tensor:
+    key = (n, str(device))
+    idxs = _TRIL_CACHE.get(key)
+    if idxs is None:
+        idxs = torch.tril_indices(n, n, device=device)
+        _TRIL_CACHE[key] = idxs
+    return idxs
+
+
 def flat_to_sym(v: torch.Tensor, n: int) -> torch.Tensor:
     """Unpacks a lower-triangular `flatH` vector (or passes through an `[n, n]` matrix) to symmetric `[n, n]`."""
     if v.ndim == 2 and v.shape == (n, n):
@@ -79,7 +88,7 @@ def flat_to_sym(v: torch.Tensor, n: int) -> torch.Tensor:
     if v.numel() != expected:
         raise ValueError(f"Expected flatH of length {expected} or ({n}, {n}) matrix, got shape {tuple(v.shape)}")
     a = torch.zeros((n, n), dtype=v.dtype, device=v.device)
-    idxs = torch.tril_indices(n, n, device=v.device)
+    idxs = _get_tril_indices(n, v.device)
     a[idxs[0], idxs[1]] = v
     a[idxs[1], idxs[0]] = v
     return a
@@ -236,10 +245,27 @@ def _match_target(full_name: str, targets: Sequence[str]) -> bool:
 def _short_yaqa_name(full_name: str) -> Optional[str]:
     if "experts." in full_name and full_name.endswith(".down_proj"):
         return "moe_down"
+    if "experts." in full_name and full_name.endswith(".gate_up_proj"):
+        return "moe_gu"
     if "shared_expert" in full_name and full_name.endswith(".down_proj"):
         return "shared_down"
+    if "shared_expert" in full_name and full_name.endswith(".gate_proj"):
+        return "shared_gate"
+    if "shared_expert" in full_name and full_name.endswith(".up_proj"):
+        return "shared_up"
     tail = full_name.rsplit(".", 1)[-1]
     return _SUBNAME_TO_YAQA_SHORT.get(tail)
+
+
+def _extract_expert_idx(full_name: str) -> Optional[int]:
+    parts = full_name.split(".")
+    for i, p in enumerate(parts[:-1]):
+        if p == "experts":
+            try:
+                return int(parts[i + 1])
+            except ValueError:
+                return None
+    return None
 
 
 class OutHessianProvider:
@@ -260,16 +286,19 @@ class OutHessianProvider:
         *,
         targets: Sequence[str] = DEFAULT_GPTQ2D_TARGETS,
         sigma_reg: float = DEFAULT_GPTQ2D_SIGMA_REG,
+        max_l_abs: Optional[float] = DEFAULT_GPTQ2D_MAX_L_ABS,
         cache_dir: Optional[Union[str, Path]] = None,
     ):
         self.targets = tuple(targets)
         self.sigma_reg = float(sigma_reg)
+        self.max_l_abs = None if max_l_abs is None or float(max_l_abs) <= 0.0 else float(max_l_abs)
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._dict: Optional[Dict[Tuple[int, str], torch.Tensor]] = None
         self._local_dir: Optional[Path] = None
         self._hf_repo: Optional[str] = None
         self._factor_cache_layer: int = -1
-        self._factor_cache: Dict[Tuple[str, int, str], Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._factor_cache: Dict[Tuple[str, int, str], Optional[Tuple[torch.Tensor, torch.Tensor]]] = {}
+        self.gated_count: int = 0
 
         if isinstance(source, dict):
             self._dict = source
@@ -372,7 +401,12 @@ class OutHessianProvider:
             del G_pad
             L_G, row_prec, _ = ldl_of_inverse_block(G_reg, size=SUPER_ROWS, use_fp64=True)
             del G_reg
-            self._factor_cache[ck] = (L_G, row_prec)
+            if self.max_l_abs is not None and float(L_G.abs().max().item()) > self.max_l_abs:
+                self.gated_count += 1
+                del L_G, row_prec
+                self._factor_cache[ck] = None
+            else:
+                self._factor_cache[ck] = (L_G, row_prec)
         else:
             del G_raw
         return self._factor_cache[ck]
@@ -393,13 +427,18 @@ class InHessianProvider:
         source: Union[str, Path, Dict[Tuple[int, str], torch.Tensor]],
         *,
         blend: float = 0.50,
+        moe_blend: Optional[float] = None,
         cache_dir: Optional[Union[str, Path]] = None,
     ):
         self.blend = float(blend)
+        self.moe_blend = float(blend if moe_blend is None else moe_blend)
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._dict: Optional[Dict[Tuple[int, str], torch.Tensor]] = None
         self._local_dir: Optional[Path] = None
         self._hf_repo: Optional[str] = None
+        self._layer_cache_idx: int = -1
+        self._layer_cache: Dict[Tuple[str, int, str], torch.Tensor] = {}
+        self._moe_stack_cache: Dict[str, Optional[torch.Tensor]] = {}
         if isinstance(source, dict):
             self._dict = source
         else:
@@ -410,10 +449,12 @@ class InHessianProvider:
                 self._hf_repo = str(source)
 
     @staticmethod
-    def _norm_spd(H: torch.Tensor) -> torch.Tensor:
+    def _norm_spd(H: torch.Tensor) -> Optional[torch.Tensor]:
         H32 = H.float()
         H32 = 0.5 * (H32 + H32.T)
-        dm = H32.diagonal().mean().clamp(min=1e-12)
+        dm = H32.diagonal().mean()
+        if not torch.isfinite(dm) or float(dm.item()) < 1e-12:
+            return None
         return H32 / dm
 
     def _candidate_names(self, layer_idx: int, full_name: str) -> List[str]:
@@ -423,29 +464,72 @@ class InHessianProvider:
             cand.append(f"{layer_idx}_{short}_hin.pt")
         return cand
 
+    def _ensure_layer_cache(self, layer_idx: int):
+        if layer_idx != self._layer_cache_idx:
+            self._layer_cache.clear()
+            self._moe_stack_cache.clear()
+            self._layer_cache_idx = layer_idx
+
     @torch.no_grad()
     def get(self, layer_idx: int, full_name: str, K: int, device: torch.device) -> Optional[torch.Tensor]:
+        self._ensure_layer_cache(layer_idx)
+        short = _short_yaqa_name(full_name)
+
+        # Fast path: stacked per-expert `{l}_moe_down_hin.pt` of shape `[E, K*(K+1)//2]`
+        if short == "moe_down":
+            e_idx = _extract_expert_idx(full_name)
+            if e_idx is None:
+                return None
+            fn = f"{layer_idx}_moe_down_hin.pt"
+            if fn not in self._moe_stack_cache:
+                stack_t = None
+                if self._dict is not None:
+                    stack_t = self._dict.get((layer_idx, "moe_down"))
+                elif self._local_dir is not None and (self._local_dir / fn).exists():
+                    stack_t = torch.load(str(self._local_dir / fn), map_location="cpu", weights_only=True)
+                self._moe_stack_cache[fn] = stack_t
+            stack_t = self._moe_stack_cache[fn]
+            if stack_t is None or stack_t.ndim != 2 or e_idx >= int(stack_t.shape[0]):
+                return None
+            v = stack_t[e_idx].to(device=device, dtype=torch.float64)
+            H64 = flat_to_sym(v, K)
+            H32 = self._norm_spd(H64)
+            del H64, v
+            return H32
+
+        dev_key = str(device)
         if self._dict is not None:
             t = self._dict.get((layer_idx, full_name))
-            if t is None:
-                short = _short_yaqa_name(full_name)
-                if short is not None:
-                    t = self._dict.get((layer_idx, short))
+            key_used = full_name
+            if t is None and short is not None:
+                t = self._dict.get((layer_idx, short))
+                key_used = short
             if t is None:
                 return None
-            H64 = flat_to_sym(t.to(device=device, dtype=torch.float64), K)
-            H32 = self._norm_spd(H64)
-            del H64
-            return H32
+            ck = (key_used, K, dev_key)
+            if ck not in self._layer_cache:
+                H64 = flat_to_sym(t.to(device=device, dtype=torch.float64), K)
+                H32 = self._norm_spd(H64)
+                del H64
+                if H32 is None:
+                    return None
+                self._layer_cache[ck] = H32
+            return self._layer_cache[ck]
 
         cand_names = self._candidate_names(layer_idx, full_name)
         if self._local_dir is not None:
             for fn in cand_names:
+                ck = (fn, K, dev_key)
+                if ck in self._layer_cache:
+                    return self._layer_cache[ck]
                 fp = self._local_dir / fn
                 if fp.exists():
                     H64 = load_output_hessian_file(fp, K, device)
                     H32 = self._norm_spd(H64)
                     del H64
+                    if H32 is None:
+                        return None
+                    self._layer_cache[ck] = H32
                     return H32
             return None
 
@@ -454,11 +538,17 @@ class InHessianProvider:
 
             kw = {"local_dir": str(self.cache_dir)} if self.cache_dir is not None else {}
             for fn in reversed(cand_names):
+                ck = (fn, K, dev_key)
+                if ck in self._layer_cache:
+                    return self._layer_cache[ck]
                 try:
                     fp = hf_hub_download(repo_id=self._hf_repo, filename=fn, **kw)
                     H64 = load_output_hessian_file(fp, K, device)
                     H32 = self._norm_spd(H64)
                     del H64
+                    if H32 is None:
+                        return None
+                    self._layer_cache[ck] = H32
                     return H32
                 except Exception:
                     continue
@@ -473,16 +563,19 @@ class InHessianProvider:
         device: torch.device,
         H_stream: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
-        if self.blend <= 0.0:
+        b = self.moe_blend if "experts." in full_name else self.blend
+        if b <= 0.0:
             return H_stream
         H_in = self.get(layer_idx, full_name, K, device)
         if H_in is None:
             return H_stream
-        if H_stream is None or self.blend >= 1.0:
-            return H_in
+        if H_stream is None or b >= 1.0:
+            return H_in.clone()
         Hs = self._norm_spd(H_stream)
-        out = self.blend * H_in + (1.0 - self.blend) * Hs
-        del H_in, Hs
+        if Hs is None:
+            return H_in.clone()
+        out = b * H_in + (1.0 - b) * Hs
+        del Hs
         return out
 
 

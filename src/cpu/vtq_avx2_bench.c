@@ -37,7 +37,7 @@
 
 // 16-byte naturally aligned `16x256` (`4,096`-weight) super-tile structs (zero padding, shared with GPU & `.vtq`):
 typedef struct {
-    uint8_t  c[16][16][2];  //  512 B (1.00000 bpw, MSB-first per byte: c[g][r][0]=cols 0..7, c[g][r][1]=cols 8..15)
+    uint8_t  c[16][16][2];  //  512 B (1.00000 bpw, LE uint16 pair, MSB-first per byte: c[g][r][0]=cols 8..15, c[g][r][1]=cols 0..7)
     uint8_t  ham[16][16];   //  256 B (0.50000 bpw, Gosset [8,4,4]: low nib=cols 0..7, high nib=cols 8..15)
     uint16_t hdr[16][1];    //   32 B (0.06250 bpw, h=1 gain bit per 16 weights: bit r = row r)
     uint8_t  u_sb[16];      //   16 B (0.03125 bpw, uint8 linear superblock row scale) ->  816 B = 1.59375 bpw
